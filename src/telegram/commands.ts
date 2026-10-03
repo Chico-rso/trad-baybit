@@ -2,6 +2,7 @@ export const commands = [
   'status',
   'positions',
   'stats',
+  'profit',
   'pause',
   'resume',
   'mode',

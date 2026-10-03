@@ -10,6 +10,7 @@ import { SignalEngine } from '../strategy/SignalEngine.js';
 import type { ExecutionEngine } from './ExecutionEngine.js';
 import type { Health } from '../monitoring/health.js';
 import { tradeStats } from '../monitoring/metrics.js';
+import { buildProfitReport } from '../monitoring/profit.js';
 import type { TelegramBot } from '../telegram/TelegramBot.js';
 import type { Command } from '../telegram/commands.js';
 import {
@@ -17,6 +18,7 @@ import {
   formatStatus,
   formatPositions,
   formatStats,
+  formatProfit,
   formatHealth,
   modeText,
   reasonText,
@@ -235,6 +237,27 @@ export class TradingEngine {
       lastSignal: this.lastSignal ?? null,
     };
   }
+  profit(now = Date.now()) {
+    const date = new Date(now);
+    const midnight = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    const health = this.getHealth();
+    return buildProfitReport({
+      mode: this.config.TRADING_MODE,
+      allTime: this.db.profitTotals(this.config.TRADING_MODE),
+      today: this.db.profitTotals(this.config.TRADING_MODE, midnight, midnight + 86400000),
+      positions: this.execution?.positions.values() ?? [],
+      quote: (symbol) =>
+        this.market.publicConnected && this.market.synchronized.has(symbol)
+          ? this.market.books.get(symbol)?.quote()
+          : undefined,
+      now,
+      marketStaleMs: this.config.MARKET_STALE_MS,
+      positionsSynchronized: !health.reasons.some((reason) =>
+        ['account state unsynchronized', 'private websocket disconnected'].includes(reason),
+      ),
+      initialCapital: this.config.TRADING_CAPITAL_USDT,
+    });
+  }
   resources() {
     return {
       status: () => this.status(),
@@ -242,6 +265,7 @@ export class TradingEngine {
       signals: () => this.db.list('signals', 200, this.config.TRADING_MODE),
       trades: () => this.db.list('trades', 200, this.config.TRADING_MODE),
       positions: () => [...(this.execution?.positions.values() ?? [])],
+      profit: () => this.profit(),
       stats: () =>
         tradeStats(
           this.db.list<Trade>('trades', 100000, this.config.TRADING_MODE),
@@ -271,6 +295,7 @@ export class TradingEngine {
     if (cmd === 'status') return formatStatus(this.status());
     if (cmd === 'positions') return formatPositions(resources.positions());
     if (cmd === 'stats') return formatStats(resources.stats());
+    if (cmd === 'profit') return formatProfit(resources.profit());
     return formatHealth(this.getHealth());
   }
 }

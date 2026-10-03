@@ -3,6 +3,7 @@ import type { Mode } from '../config/env.js';
 import type { Health } from '../monitoring/health.js';
 import type { TradingEngine } from '../trading/TradingEngine.js';
 import type { tradeStats } from '../monitoring/metrics.js';
+import type { ProfitReport } from '../monitoring/profit.js';
 
 const number = (v: number) =>
   new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 8 }).format(v);
@@ -171,5 +172,52 @@ export function formatStats(s: ReturnType<typeof tradeStats>): string {
     `Результат после комиссий: ${money(s.netPnL)}`,
     `Комиссии: ${money(s.fees)}`,
     `Средний результат сделки: ${money(s.expectancy)}`,
+  ].join('\n');
+}
+
+const profitNumber = (value: number, digits = 6, signed = true): string => {
+  const rounded = Number(value.toFixed(digits));
+  const magnitude = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: digits }).format(
+    Math.abs(rounded),
+  );
+  return `${rounded < 0 ? '−' : signed && rounded > 0 ? '+' : ''}${magnitude}`;
+};
+const profitMoney = (value: number, signed = true) => `${profitNumber(value, 6, signed)} USDT`;
+const unavailable = 'недоступен — данные ещё проверяются или устарели';
+
+export function formatProfit(r: ProfitReport): string {
+  const closed = r.allTime;
+  return [
+    '💰 Прибыль бота',
+    modeText(r.mode),
+    '',
+    'За всё время — завершённые сделки:',
+    `Заработано на прибыльных: ${profitMoney(closed.winningPnL)}`,
+    `Потеряно на убыточных: ${profitMoney(closed.losingPnL)}`,
+    `Чистый итог: ${profitMoney(closed.netPnL)}`,
+    `Комиссии: ${profitMoney(closed.fees, false)} — уже включены в итог`,
+    `Закрыто сделок: ${closed.totalTrades}; прибыльных: ${closed.wins}, убыточных: ${closed.losses}, без прибыли и убытка: ${closed.breakEven}`,
+    '',
+    `Сегодня (UTC): ${profitMoney(r.today.netPnL)}, закрыто ${r.today.totalTrades} сделок`,
+    '',
+    `Открытых позиций${r.openPnL === null ? ' в журнале' : ''}: ${r.openPositions}`,
+    `Их текущий результат: ${r.openPnL === null ? unavailable : profitMoney(r.openPnL)}`,
+    `Общий результат сейчас: ${r.totalPnL === null ? unavailable : profitMoney(r.totalPnL)}`,
+    ...(r.initialCapital === null
+      ? []
+      : [
+          '',
+          `Исходный капитал бота: ${profitMoney(r.initialCapital, false)}`,
+          `Расчётный капитал сейчас: ${r.currentCapital === null ? unavailable : profitMoney(r.currentCapital, false)}`,
+          `Изменение: ${r.returnPercent === null ? 'нет актуальных данных' : `${profitNumber(r.returnPercent, 4)}%`}`,
+          'Капитал рассчитан по выделенной сумме и результатам бота.',
+        ]),
+    ...(r.openPositions === 0
+      ? []
+      : [
+          '',
+          'Результат открытых позиций меняется с ценой.',
+          'Учтены списанные комиссии; комиссия будущего закрытия не включена.',
+        ]),
   ].join('\n');
 }

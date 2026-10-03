@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import type { Logger } from '../utils/logger.js';
 export type Resources = Record<
-  'status' | 'health' | 'signals' | 'trades' | 'positions' | 'stats',
+  'status' | 'health' | 'signals' | 'trades' | 'positions' | 'stats' | 'profit',
   () => unknown
 >;
 export function route(

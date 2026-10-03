@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import type { ClosedProfit } from '../monitoring/profit.js';
 
 export const tables = ['signals', 'orders', 'fills', 'positions', 'trades', 'events'] as const;
 export type Table = (typeof tables)[number];
@@ -52,6 +53,31 @@ export class Journal {
       : `SELECT payload FROM ${this.table(table)} ORDER BY timestamp DESC LIMIT ?`;
     const rows = mode ? this.db.prepare(query).all(mode, limit) : this.db.prepare(query).all(limit);
     return (rows as { payload: string }[]).map((r) => JSON.parse(r.payload) as T);
+  }
+  profitTotals(mode: string, since = 0, until = Number.MAX_SAFE_INTEGER): ClosedProfit {
+    return this.db
+      .prepare(
+        `
+      WITH closed AS (
+        SELECT json_extract(payload, '$.netPnL') AS netPnL,
+               json_extract(payload, '$.fees') AS fees
+        FROM trades
+        WHERE mode = ?
+          AND json_extract(payload, '$.exitTime') >= ?
+          AND json_extract(payload, '$.exitTime') < ?
+      )
+      SELECT count(*) AS totalTrades,
+             coalesce(sum(CASE WHEN netPnL > 0 THEN 1 ELSE 0 END), 0) AS wins,
+             coalesce(sum(CASE WHEN netPnL < 0 THEN 1 ELSE 0 END), 0) AS losses,
+             coalesce(sum(CASE WHEN netPnL = 0 THEN 1 ELSE 0 END), 0) AS breakEven,
+             coalesce(sum(CASE WHEN netPnL > 0 THEN netPnL ELSE 0 END), 0) AS winningPnL,
+             coalesce(sum(CASE WHEN netPnL < 0 THEN netPnL ELSE 0 END), 0) AS losingPnL,
+             coalesce(sum(netPnL), 0) AS netPnL,
+             coalesce(sum(fees), 0) AS fees
+      FROM closed
+    `,
+      )
+      .get(mode, since, until) as unknown as ClosedProfit;
   }
   setState(id: string, value: unknown): void {
     this.db

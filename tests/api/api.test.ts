@@ -9,9 +9,12 @@ describe('read-only dashboard routing', () => {
       trades: () => [],
       positions: () => [],
       stats: () => ({}),
+      profit: () => ({ totalPnL: 0 }),
     };
     expect(route('GET', '/api/status', resources)).toEqual({ code: 200, body: { mode: 'signal' } });
     expect(route('POST', '/api/status', resources).code).toBe(405);
+    expect(route('GET', '/api/profit', resources)).toEqual({ code: 200, body: { totalPnL: 0 } });
+    expect(route('POST', '/api/profit', resources).code).toBe(405);
     expect(route('GET', '/api/config', resources).code).toBe(404);
   });
 });
