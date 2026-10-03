@@ -58,10 +58,37 @@ Files: `README.md`, approved spec and this plan; production archive under `.tool
 - [x] Document extra GET confirmation, preserved manual latch for unresolved mismatch, and Telegram commands menu. Mark the spec approved by the user's `примени` and record the subsequent menu request.
 - [x] Obtain independent spec and quality review of both tasks; resolve actionable findings and rerun affected checks.
 - [x] Run all tests (132 passed), typecheck, lint, formatting check for changed TypeScript, and production build. Merge verified work locally into main without touching untracked server memory.
-- [ ] Package dist from the verified worktree with existing production node_modules, package.json and DEPLOY_COMMIT; do not include ENV or local SQLite.
-- [ ] Upload archive; stop trad-baybit gracefully; save consistent server SQLite backup and previous app directory. Replace only application directory, retain server ENV and risk state. Start service and verify startup account reconciliation, connections, menu registration, and current latch reasons.
-- [ ] Handle current incident latch only after direct account audit and fresh market checks, preserving any unrelated guards. Keep rollback files and verify the two sites and football bot health endpoint.
+- [x] Package dist from the verified worktree with existing production node_modules, package.json and DEPLOY_COMMIT; do not include ENV or local SQLite.
+- [x] Upload archive; stop trad-baybit gracefully; save consistent server SQLite backup and previous app directory. Replace only application directory, retain server ENV and risk state. Start service and verify startup account reconciliation, connections, menu registration, and current latch reasons.
+- [x] Handle current incident latch only after direct account audit and fresh market checks, preserving any unrelated guards. Keep rollback files and verify the two sites and football bot health endpoint.
 
 User authorization covers applying the approved reconciliation design and adding the existing Telegram commands to the menu. Current guard reset was explicitly authorized earlier; additional unexplained reasons require investigation before removal.
 
 Verification: independent spec review approved; independent quality review identified a stale protection-order classification edge, fixed with three regressions and approved on re-review. Full suite: 132 tests passed; typecheck, lint, build, changed-file formatting and diff checks passed.
+
+## Deployment evidence
+
+Applied on 2026-10-03 from commit `73884ad08f0449cc3f2bacd21db064f6d689f7ab`.
+The merged main checkout also passed all 132 tests; the temporary worktree was removed.
+Server archive SHA-256: `9abaac772d4077a9aba28d95b09e84ae2fcb633d2179321dd14df3d2351865ab`.
+Application rollback, consistent SQLite backup and retained environment copy:
+`/var/backups/trad-baybit-confirmation-20261003T163631Z`.
+A separate pre-reset SQLite backup is at
+`/var/backups/trad-baybit-guard-reset-20261003T163952Z/demo.db`.
+
+New code was first started with the existing latch preserved. Direct DEMO GETs
+confirmed zero positions/orders before the authorized one-time incident reset;
+all non-kill state was compared and preserved inside the reset transaction.
+The inspected `market data stale` latch was manually cleared only after both
+connections and complete account/market health had recovered for 30 seconds.
+No blanket automatic recovery was added for market or other protection reasons.
+
+After reset the service resumed signal/order processing and opened two DEMO
+positions. A further 30-second observation found no new latch or connection loss;
+brief `account state unsynchronized` statuses during scheduled reconciliation
+resolved on the next sample. Final state was HEALTHY with `killSwitch.active=false`.
+Telegram `getMyCommands` returned all eight Russian-described commands and
+`getChatMenuButton` returned `commands`, verified again after the final restart.
+A transient Telegram read timeout was retried successfully without sending messages.
+Both existing sites returned HTTP 200 and the football bot health returned ok.
+Server ENV, risk limits, daily PnL and cooldown records were retained.
