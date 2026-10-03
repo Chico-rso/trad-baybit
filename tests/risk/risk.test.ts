@@ -227,6 +227,105 @@ describe('guard journal recovery', () => {
   });
 });
 
+describe('continuous demo testing', () => {
+  const demo = {
+    TRADING_MODE: 'demo',
+    BYBIT_API_KEY: 'demo-key',
+    BYBIT_API_SECRET: 'demo-secret',
+    TRADING_CAPITAL_USDT: '100',
+    DEMO_CONTINUOUS_TESTING: 'true',
+  };
+  it('keeps entering after drawdown and many consecutive losses, including after restart', () => {
+    const c = parseEnv(demo),
+      db = new Journal(':memory:');
+    try {
+      const guard = new DailyLossGuard(c, db, 'demo');
+      guard.initialize(200000, 1000, 100);
+      for (let i = 0; i < 60; i++) guard.record(-1, 1000);
+      const restored = new DailyLossGuard(c, db, 'demo');
+      const risk = new RiskManager(c, restored, new KillSwitch(db, createLogger('silent'), 'demo'));
+      const result = risk.check(signal, {
+        equity: 140000,
+        tradingEquity: 40,
+        openSymbols: [],
+        pendingSymbols: [],
+        healthy: true,
+        marketFresh: true,
+        paused: false,
+        now: 1001,
+      });
+      expect(result).toEqual({ allowed: true, reasons: [] });
+      expect(restored.blocked(140000, 1001, 40)).toBe(false);
+      expect(restored.state.dailyPnL).toBe(-60);
+      expect(restored.state.consecutiveLosses).toBe(60);
+      expect(restored.state.cooldownUntil).toBeGreaterThan(1001);
+    } finally {
+      db.close();
+    }
+  });
+  it('keeps technical checks and manual pause enforced during continuous testing', () => {
+    const c = parseEnv(demo),
+      db = new Journal(':memory:');
+    try {
+      const guard = new DailyLossGuard(c, db, 'demo');
+      const kill = new KillSwitch(db, createLogger('silent'), 'demo');
+      const risk = new RiskManager(c, guard, kill);
+      const ctx = {
+        equity: 200000,
+        tradingEquity: 100,
+        openSymbols: [] as string[],
+        pendingSymbols: [] as string[],
+        healthy: true,
+        marketFresh: true,
+        paused: false,
+        now: 1000,
+      };
+      expect(risk.check(signal, ctx).allowed).toBe(true);
+      expect(risk.check(signal, { ...ctx, marketFresh: false }).reasons).toContain(
+        'market data stale',
+      );
+      expect(risk.check(signal, { ...ctx, healthy: false }).reasons).toContain('system unhealthy');
+      expect(risk.check(signal, { ...ctx, paused: true }).reasons).toContain('paused');
+      expect(risk.check(signal, { ...ctx, pendingSymbols: [signal.symbol] }).reasons).toContain(
+        'pending order',
+      );
+      expect(risk.check(signal, { ...ctx, openSymbols: [signal.symbol] }).reasons).toContain(
+        'existing position',
+      );
+      for (const equity of [0, NaN]) expect(guard.blocked(equity, 1000, 100)).toBe(true);
+      expect(guard.blocked(200000, 1000, 0)).toBe(true);
+      kill.activate('local/exchange position mismatch');
+      expect(risk.check(signal, ctx).reasons).toContain('kill switch active');
+    } finally {
+      db.close();
+    }
+  });
+  it('retains loss restrictions in demo unless continuous testing is explicitly enabled', () => {
+    const c = parseEnv({ ...demo, DEMO_CONTINUOUS_TESTING: 'false' }),
+      db = new Journal(':memory:');
+    try {
+      const guard = new DailyLossGuard(c, db, 'demo');
+      guard.initialize(200000, 1000, 100);
+      for (let i = 0; i < 3; i++) guard.record(-1, 1000);
+      const risk = new RiskManager(c, guard, new KillSwitch(db, createLogger('silent'), 'demo'));
+      expect(
+        risk.check(signal, {
+          equity: 200000,
+          tradingEquity: 97,
+          openSymbols: [],
+          pendingSymbols: [],
+          healthy: true,
+          marketFresh: true,
+          paused: false,
+          now: 1001,
+        }).reasons,
+      ).toEqual(['daily loss limit', 'maximum consecutive losses', 'loss cooldown']);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe('cost viability', () => {
   it('rejects an ATR target that cannot even pay estimated round-trip expenses', () => {
     const db = new Journal(':memory:');

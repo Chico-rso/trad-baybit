@@ -23,7 +23,7 @@ try {
       });
     });
     console.log(
-      'Kill latch reset. Daily loss, consecutive losses, position ownership and startup reconciliation remain enforced.',
+      'Kill latch reset. Risk statistics, configured loss policy, position ownership and startup reconciliation are preserved.',
     );
   } finally {
     db?.close();

@@ -28,9 +28,11 @@ export class RiskManager {
     if (!Number.isFinite(ctx.equity) || ctx.equity <= 0) reasons.push('equity unavailable');
     else if (this.guard.blocked(ctx.equity, ctx.now, ctx.tradingEquity))
       reasons.push('daily loss limit');
-    if (this.guard.state.consecutiveLosses >= this.c.MAX_CONSECUTIVE_LOSSES)
-      reasons.push('maximum consecutive losses');
-    if (ctx.now < this.guard.state.cooldownUntil) reasons.push('loss cooldown');
+    if (this.guard.lossLimitsEnabled) {
+      if (this.guard.state.consecutiveLosses >= this.c.MAX_CONSECUTIVE_LOSSES)
+        reasons.push('maximum consecutive losses');
+      if (ctx.now < this.guard.state.cooldownUntil) reasons.push('loss cooldown');
+    }
     if (ctx.openSymbols.includes(signal.symbol)) reasons.push('existing position');
     if (ctx.pendingSymbols.includes(signal.symbol)) reasons.push('pending order');
     if (new Set([...ctx.openSymbols, ...ctx.pendingSymbols]).size >= this.c.MAX_OPEN_POSITIONS)

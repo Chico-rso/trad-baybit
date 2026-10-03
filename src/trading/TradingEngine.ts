@@ -229,6 +229,7 @@ export class TradingEngine {
         this.config.TRADING_CAPITAL_USDT ?? this.equity(),
       ),
       dailyPnL: this.guard.state.dailyPnL,
+      lossLimitsEnabled: this.guard.lossLimitsEnabled,
       openPositions: this.execution?.positions.size ?? 0,
       pendingSymbols: this.execution?.pendingSymbols() ?? [],
       paused: this.paused,

@@ -164,7 +164,7 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
       throw new Error('Order result is ambiguous; no duplicate POST sent');
     }
   }
-  handleOrders(orders: ExchangeOrder[]): void {
+  handleOrders(orders: ExchangeOrder[], knownProtectionIds?: ReadonlySet<string>): void {
     for (const remote of orders) {
       this.exchangeOrders.set(remote.orderId, remote);
       const local =
@@ -173,6 +173,7 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
       if (!local) {
         if (
           !this.knownProtection(remote) &&
+          !knownProtectionIds?.has(remote.orderId) &&
           ['New', 'PartiallyFilled', 'Created'].includes(remote.orderStatus)
         ) {
           this.synchronized = false;
@@ -307,7 +308,15 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
       const knownProtectionIds = new Set(
         orders.filter((order) => this.knownProtection(order)).map((order) => order.orderId),
       );
-      this.handleOrders(orders);
+      // Cache stop metadata, but classify ownership after confirming non-atomic snapshots.
+      for (const order of orders) this.exchangeOrders.set(order.orderId, order);
+      this.handleOrders(
+        orders.filter(
+          (remote) =>
+            this.orders.has(remote.orderLinkId) ||
+            [...this.orders.values()].some((local) => local.exchangeId === remote.orderId),
+        ),
+      );
       // Recover a crash between a terminal close-order write and clearing its reservation.
       for (const order of this.orders.values()) this.releaseCloseReservation(order.id);
       for (const local of [...this.orders.values()]) {
@@ -321,15 +330,30 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
         else this.kill.activate('unresolved durable order intent');
       }
       let positions = await this.client.positions();
+      // REST snapshots are not atomic: an entry or exit can land after the fills GET.
       if (
         [...this.positions.values()].some(
           (local) =>
             !positions.some((remote) => remote.symbol === local.symbol && Number(remote.size) > 0),
-        )
+        ) ||
+        positions.some((remote) => {
+          const size = Number(remote.size);
+          if (!(size > 0)) return false;
+          const local = this.positions.get(remote.symbol);
+          return (
+            !local ||
+            !nearlyEqual(size, local.quantity) ||
+            remote.side !== (local.side === 'Long' ? 'Buy' : 'Sell') ||
+            !nearlyEqual(Number(remote.avgPrice), local.entry, 1e-5)
+          );
+        })
       ) {
         this.handleExecutions(await this.client.executions(startTime));
         positions = await this.client.positions();
       }
+      for (const order of orders)
+        if (this.knownProtection(order)) knownProtectionIds.add(order.orderId);
+      this.handleOrders(orders, knownProtectionIds);
       this.balance = await this.client.equity();
       let mismatch = false;
       for (const remote of positions) {

@@ -20,6 +20,25 @@ const raw = {
 const logger = createLogger('silent');
 
 describe('Bybit Demo Trading isolation', () => {
+  it('defaults continuous testing off and permits opting in only for demo', () => {
+    expect(parseEnv(raw).DEMO_CONTINUOUS_TESTING).toBe(false);
+    expect(parseEnv({ ...raw, DEMO_CONTINUOUS_TESTING: 'true' }).DEMO_CONTINUOUS_TESTING).toBe(
+      true,
+    );
+  });
+  it.each(['signal', 'paper', 'testnet', 'live'])(
+    'rejects continuous demo testing in %s mode',
+    (mode) => {
+      expect(() =>
+        parseEnv({
+          ...raw,
+          TRADING_MODE: mode,
+          ENABLE_LIVE_TRADING: mode === 'live' ? 'true' : 'false',
+          DEMO_CONTINUOUS_TESTING: 'true',
+        }),
+      ).toThrow('DEMO_CONTINUOUS_TESTING');
+    },
+  );
   it('requires demo credentials and keeps real-money trading disabled', () => {
     expect(() => parseEnv({ TRADING_MODE: 'demo' })).toThrow('credentials');
     const c = parseEnv(raw);
@@ -80,42 +99,49 @@ describe('Bybit Demo Trading isolation', () => {
     expect(fetcher.mock.calls[0]?.[0]).toBe('https://api-demo.bybit.com/v5/order/create');
   });
 
-  it('requires private demo stream readiness and reports the demo account network', () => {
-    const c = parseEnv(raw),
-      db = new Journal(':memory:'),
-      market = new MarketState(c.SYMBOLS),
-      kill = new KillSwitch(db, logger, 'demo');
-    try {
-      expect(health(c, market, db, 1, 1000, true, 1000).reasons).toContain(
-        'private websocket disconnected',
-      );
-      const privateData = new BybitPrivateData(c, logger);
-      privateData.stop();
-      const engine = new TradingEngine(
-        c,
-        market,
-        db,
-        logger,
-        new DailyLossGuard(c, db, 'demo'),
-        kill,
-        undefined,
-        () => ({ status: 'HEALTHY', reasons: [], timestamp: 1000 }),
-      );
-      expect(engine.status().network).toBe('demo');
-      const testnet = parseEnv({ ...raw, TRADING_MODE: 'testnet' });
-      expect(
-        () =>
-          new ExchangeExecutionEngine(
-            c,
-            db,
-            logger,
-            new Map(),
-            new BybitClient(new BybitRestClient(testnet, logger)),
-            kill,
-          ),
-      ).toThrow('mismatch');
-    } finally {
-      db.close();
-    }
-  });
+  it.each([false, true])(
+    'reports demo loss limits and requires private readiness with continuous testing: %s',
+    async (continuous) => {
+      const c = parseEnv({ ...raw, DEMO_CONTINUOUS_TESTING: String(continuous) }),
+        db = new Journal(':memory:'),
+        market = new MarketState(c.SYMBOLS),
+        kill = new KillSwitch(db, logger, 'demo');
+      try {
+        expect(health(c, market, db, 1, 1000, true, 1000).reasons).toContain(
+          'private websocket disconnected',
+        );
+        const privateData = new BybitPrivateData(c, logger);
+        privateData.stop();
+        const engine = new TradingEngine(
+          c,
+          market,
+          db,
+          logger,
+          new DailyLossGuard(c, db, 'demo'),
+          kill,
+          undefined,
+          () => ({ status: 'HEALTHY', reasons: [], timestamp: 1000 }),
+        );
+        expect(engine.status().network).toBe('demo');
+        expect(engine.status().lossLimitsEnabled).toBe(!continuous);
+        expect(await engine.command('status')).toContain(
+          continuous ? 'Остановки по убыткам: отключены' : 'Остановки по убыткам: включены',
+        );
+        const testnet = parseEnv({ ...raw, TRADING_MODE: 'testnet' });
+        expect(
+          () =>
+            new ExchangeExecutionEngine(
+              c,
+              db,
+              logger,
+              new Map(),
+              new BybitClient(new BybitRestClient(testnet, logger)),
+              kill,
+            ),
+        ).toThrow('mismatch');
+      } finally {
+        db.close();
+      }
+    },
+  );
 });

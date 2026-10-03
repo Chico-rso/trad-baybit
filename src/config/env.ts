@@ -14,6 +14,7 @@ const schema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error', 'silent']).default('info'),
   TRADING_MODE: z.enum(['signal', 'paper', 'testnet', 'demo', 'live']).default('signal'),
   ENABLE_LIVE_TRADING: bool(false),
+  DEMO_CONTINUOUS_TESTING: bool(false),
   MARKET_DATA_NETWORK: z.enum(['testnet', 'mainnet']).default('testnet'),
   BYBIT_API_KEY: z.string().default(''),
   BYBIT_API_SECRET: z.string().default(''),
@@ -101,6 +102,8 @@ export function parseEnv(raw: Record<string, unknown>): Config {
       `Invalid configuration: ${result.error.issues.map((i) => i.path.join('.') + ': ' + i.message).join('; ')}`,
     );
   const c = result.data;
+  if (c.DEMO_CONTINUOUS_TESTING && c.TRADING_MODE !== 'demo')
+    throw new Error('DEMO_CONTINUOUS_TESTING is only permitted in DEMO');
   if (c.TRADING_MODE === 'live' && !c.ENABLE_LIVE_TRADING)
     throw new Error('LIVE requires TRADING_MODE=live and ENABLE_LIVE_TRADING=true');
   if (c.TRADING_MODE === 'demo' && c.ENABLE_LIVE_TRADING)

@@ -146,6 +146,7 @@ export function formatStatus(s: ReturnType<TradingEngine['status']>): string {
     `Баланс аккаунта: ${money(s.balance)}`,
     `Капитал для расчёта сделок: ${money(s.tradingCapitalUSDT)}`,
     `Результат закрытых сделок сегодня (по UTC): ${money(s.dailyPnL)}`,
+    `Остановки по убыткам: ${s.lossLimitsEnabled ? 'включены' : 'отключены'}`,
     `Открытых позиций: ${s.openPositions}`,
     `Ордеров, ожидающих исполнения: ${s.pendingSymbols.length}`,
     ...s.killSwitch.reasons.map((r) => `Причина остановки: ${reasonText(r)}`),

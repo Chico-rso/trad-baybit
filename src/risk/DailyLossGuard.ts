@@ -113,6 +113,7 @@ export class DailyLossGuard {
     )
       return true;
     this.initialize(equity, now, tradingEquity);
+    if (!this.lossLimitsEnabled) return false;
     if (this.value.baseline <= 0) return true;
     const loss = Math.max(
       -this.value.dailyPnL,
@@ -131,5 +132,8 @@ export class DailyLossGuard {
   }
   get state(): Readonly<GuardState> {
     return this.value;
+  }
+  get lossLimitsEnabled(): boolean {
+    return this.c.TRADING_MODE !== 'demo' || !this.c.DEMO_CONTINUOUS_TESTING;
   }
 }

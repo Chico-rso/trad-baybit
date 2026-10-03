@@ -38,7 +38,7 @@ const plan = {
   riskBudget: 25,
 };
 const quote = { bid: 99.9, ask: 100.1, timestamp: 1000, imbalance: 1 };
-const openPosition = async () => {
+const openPosition = async (filled = true) => {
   const s = setup();
   const now = Date.now();
   const create = vi
@@ -61,7 +61,7 @@ const openPosition = async () => {
     execType: 'Trade',
     closedSize: '0',
   };
-  s.engine.handleExecutions([entry]);
+  if (filled) s.engine.handleExecutions([entry]);
   const close = {
     ...entry,
     execId: 'stop-fill',
@@ -107,6 +107,91 @@ const nativeStop = {
 };
 
 describe('confirmation of a position missing from the first exchange snapshot', () => {
+  it.each([false, true])(
+    'confirms an owned entry before its execution with native protection orders: %s',
+    async (protectionOrders) => {
+      const s = await openPosition(false);
+      if (protectionOrders)
+        vi.mocked(s.client.orders).mockResolvedValue([
+          nativeStop,
+          { ...nativeStop, orderId: 'exchange-target', stopOrderType: 'TakeProfit' },
+        ]);
+      vi.spyOn(s.client, 'findOrder').mockResolvedValue({
+        ...nativeStop,
+        orderId: s.entry.orderId,
+        orderLinkId: s.entry.orderLinkId,
+        side: 'Buy',
+        reduceOnly: false,
+        stopOrderType: undefined,
+        orderStatus: 'Filled',
+        cumExecQty: '1',
+      });
+      s.executions.mockResolvedValueOnce([]).mockResolvedValue([s.entry, s.entry]);
+      s.positions.mockResolvedValue([remotePosition]);
+      try {
+        await s.engine.reconcile();
+        expect(s.kill.reasons).toEqual([]);
+        expect(s.engine.synchronized).toBe(true);
+        expect(s.engine.positions.get('BTCUSDT')?.quantity).toBe(1);
+        expect(s.db.list('fills')).toHaveLength(1);
+        expect(s.executions).toHaveBeenCalledTimes(2);
+        expect(s.positions).toHaveBeenCalledTimes(2);
+        expect(s.create).toHaveBeenCalledOnce();
+        expect(s.cancel).not.toHaveBeenCalled();
+        expect(s.protection).not.toHaveBeenCalled();
+      } finally {
+        s.db.close();
+      }
+    },
+  );
+
+  it('confirms a later partial entry fill before latching a quantity mismatch', async () => {
+    const s = await openPosition(false);
+    s.engine.handleExecutions([{ ...s.entry, execId: 'first-half', execQty: '0.5' }]);
+    vi.mocked(s.client.orders).mockResolvedValue([
+      {
+        ...nativeStop,
+        orderId: s.entry.orderId,
+        orderLinkId: s.entry.orderLinkId,
+        side: 'Buy',
+        reduceOnly: false,
+        stopOrderType: undefined,
+        orderStatus: 'Filled',
+        cumExecQty: '1',
+      },
+    ]);
+    s.executions
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{ ...s.entry, execId: 'second-half', execQty: '0.5' }]);
+    s.positions.mockResolvedValue([remotePosition]);
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.reasons).toEqual([]);
+      expect(s.engine.synchronized).toBe(true);
+      expect(s.engine.positions.get('BTCUSDT')?.quantity).toBe(1);
+      expect(s.db.list('fills')).toHaveLength(2);
+      expect(s.executions).toHaveBeenCalledTimes(2);
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('keeps an actually unknown exchange position blocked after confirmation', async () => {
+    const s = await openPosition();
+    s.positions.mockResolvedValue([remotePosition, { ...remotePosition, symbol: 'ETHUSDT' }]);
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.reasons).toEqual(['unknown open exchange position']);
+      expect(s.engine.synchronized).toBe(false);
+      expect(s.executions).toHaveBeenCalledTimes(2);
+      expect(s.positions).toHaveBeenCalledTimes(2);
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+
   it('preserves known native SL/TP classification from the order snapshot when confirmation closes the position', async () => {
     const s = await openPosition();
     const orders = vi
