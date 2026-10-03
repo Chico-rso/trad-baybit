@@ -1,0 +1,12 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "tickSize": "0.01",
+    "qtyStep": "0.001",
+    "minOrderQty": "0.001",
+    "maxOrderQty": "1000",
+    "maxMarketOrderQty": "1000",
+    "minNotional": "5",
+    "maxLeverage": 3
+  }
+]

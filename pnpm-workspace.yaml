@@ -1,0 +1,10 @@
+packages:
+  - .
+storeDir: .tools/pnpm-store
+confirmModulesPurge: false
+managePackageManagerVersions: false
+verifyDepsBeforeRun: false
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - eslint@10.12.0
