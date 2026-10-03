@@ -38,6 +38,285 @@ const plan = {
   riskBudget: 25,
 };
 const quote = { bid: 99.9, ask: 100.1, timestamp: 1000, imbalance: 1 };
+const openPosition = async () => {
+  const s = setup();
+  const now = Date.now();
+  const create = vi
+    .spyOn(s.client, 'createOrder')
+    .mockResolvedValue({ orderId: 'entry', orderLinkId: 'ignored' });
+  const cancel = vi.spyOn(s.client, 'cancelOrder').mockResolvedValue({});
+  const protection = vi.spyOn(s.client, 'setProtection').mockResolvedValue({});
+  await s.engine.submit(signal, plan, quote, now);
+  const id = [...s.engine.orders.keys()][0]!;
+  const entry = {
+    execId: 'entry-fill',
+    orderId: 'entry',
+    orderLinkId: id,
+    symbol: 'BTCUSDT',
+    side: 'Buy' as const,
+    execQty: '1',
+    execPrice: '100',
+    execFee: '0.02',
+    execTime: String(now),
+    execType: 'Trade',
+    closedSize: '0',
+  };
+  s.engine.handleExecutions([entry]);
+  const close = {
+    ...entry,
+    execId: 'stop-fill',
+    orderId: 'exchange-stop',
+    orderLinkId: '',
+    side: 'Sell' as const,
+    execPrice: '95',
+    execTime: String(now + 1),
+    closedSize: '1',
+    stopOrderType: 'StopLoss',
+  };
+  const executions = vi.spyOn(s.client, 'executions').mockResolvedValue([]);
+  const positions = vi.spyOn(s.client, 'positions').mockResolvedValue([]);
+  vi.spyOn(s.client, 'orders').mockResolvedValue([]);
+  vi.spyOn(s.client, 'equity').mockResolvedValue(10000);
+  return { ...s, now, entry, close, create, cancel, protection, executions, positions };
+};
+const remotePosition = {
+  symbol: 'BTCUSDT',
+  size: '1',
+  side: 'Buy' as const,
+  avgPrice: '100',
+  positionIdx: 0,
+  stopLoss: '95',
+  takeProfit: '110',
+  leverage: '1',
+};
+const nativeStop = {
+  orderId: 'exchange-stop',
+  orderLinkId: '',
+  symbol: 'BTCUSDT',
+  side: 'Sell' as const,
+  qty: '1',
+  orderStatus: 'New',
+  cumExecQty: '0',
+  avgPrice: '',
+  createdTime: '1000',
+  updatedTime: '1000',
+  reduceOnly: true,
+  price: '',
+  orderType: 'Market' as const,
+  stopOrderType: 'StopLoss',
+};
+
+describe('confirmation of a position missing from the first exchange snapshot', () => {
+  it('preserves known native SL/TP classification from the order snapshot when confirmation closes the position', async () => {
+    const s = await openPosition();
+    const orders = vi
+      .mocked(s.client.orders)
+      .mockResolvedValue([
+        nativeStop,
+        { ...nativeStop, orderId: 'exchange-target', stopOrderType: 'TakeProfit' },
+      ]);
+    s.executions.mockResolvedValueOnce([]).mockResolvedValue([s.close]);
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.active).toBe(false);
+      expect(s.engine.positions.size).toBe(0);
+      expect(s.engine.synchronized).toBe(true);
+      expect(s.db.state('reconcile:testnet')).toEqual(
+        expect.objectContaining({ synchronized: true }),
+      );
+      expect(s.db.list('trades')).toHaveLength(1);
+      expect(orders).toHaveBeenCalledOnce();
+      expect(s.executions).toHaveBeenCalledTimes(2);
+      expect(s.positions).toHaveBeenCalledTimes(2);
+      expect(s.create).toHaveBeenCalledOnce();
+      expect(s.cancel).not.toHaveBeenCalled();
+      expect(s.protection).not.toHaveBeenCalled();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it.each([undefined, 'StopLoss'])(
+    'blocks an unknown non-reduce-only order alongside known protection: stop type %s',
+    async (stopOrderType) => {
+      const s = await openPosition();
+      vi.mocked(s.client.orders).mockResolvedValue([
+        nativeStop,
+        { ...nativeStop, orderId: 'unknown-order', reduceOnly: false, stopOrderType },
+      ]);
+      s.executions.mockResolvedValueOnce([]).mockResolvedValue([s.close]);
+      try {
+        await s.engine.reconcile();
+        expect(s.engine.positions.size).toBe(0);
+        expect(s.db.list('trades')).toHaveLength(1);
+        expect(s.engine.synchronized).toBe(false);
+        expect(s.kill.reasons).toEqual(['unknown active exchange order']);
+        expect(s.create).toHaveBeenCalledOnce();
+      } finally {
+        s.db.close();
+      }
+    },
+  );
+
+  it('accounts a stop fill that appears after the first executions GET without a false kill', async () => {
+    const s = await openPosition();
+    s.engine.synchronized = true;
+    s.executions
+      .mockImplementationOnce(async () => {
+        expect(s.engine.synchronized).toBe(false);
+        return [];
+      })
+      .mockImplementationOnce(async () => {
+        expect(s.engine.synchronized).toBe(false);
+        return [s.close];
+      });
+    s.positions.mockImplementation(async () => {
+      expect(s.engine.synchronized).toBe(false);
+      return [];
+    });
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.active).toBe(false);
+      expect(s.engine.synchronized).toBe(true);
+      expect(s.engine.positions.size).toBe(0);
+      expect(s.db.list('trades')).toEqual([
+        expect.objectContaining({ exitReason: 'stop_loss', quantity: 1, netPnL: -5.04 }),
+      ]);
+      expect(s.db.list('fills')).toHaveLength(2);
+      expect(s.executions).toHaveBeenCalledTimes(2);
+      expect(s.positions).toHaveBeenCalledTimes(2);
+      expect(s.executions.mock.calls[1]).toEqual(s.executions.mock.calls[0]);
+      expect(s.executions.mock.calls[0]![0]).toBeGreaterThanOrEqual(s.now - 6 * 86400000);
+      expect(s.create).toHaveBeenCalledOnce();
+      expect(s.cancel).not.toHaveBeenCalled();
+      expect(s.protection).not.toHaveBeenCalled();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('deduplicates repeated fills during confirmation and after restoring the persisted ledger', async () => {
+    const s = await openPosition();
+    s.executions.mockResolvedValueOnce([s.entry]).mockResolvedValue([s.entry, s.close, s.close]);
+    try {
+      await s.engine.reconcile();
+      const restoredKill = new KillSwitch(s.db, createLogger('silent'), 'testnet');
+      const restored = new ExchangeExecutionEngine(
+        s.c,
+        s.db,
+        createLogger('silent'),
+        new Map([['BTCUSDT', instrument]]),
+        s.client,
+        restoredKill,
+      );
+      await restored.reconcile();
+      restored.handleExecutions([s.close]);
+      expect(restored.positions.size).toBe(0);
+      expect(restored.synchronized).toBe(true);
+      expect(restoredKill.active).toBe(false);
+      expect(s.db.list('trades')).toHaveLength(1);
+      expect(s.db.list('fills')).toHaveLength(2);
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('preserves an unrelated persisted kill when the closing fill is confirmed', async () => {
+    const s = await openPosition();
+    s.kill.activate('daily loss limit');
+    s.executions.mockResolvedValueOnce([]).mockResolvedValue([s.close]);
+    try {
+      await s.engine.reconcile();
+      expect(s.engine.synchronized).toBe(true);
+      expect(s.kill.reasons).toEqual(['daily loss limit']);
+      expect(s.db.state('kill:testnet')).toEqual(['daily loss limit']);
+      await expect(s.engine.submit(signal, plan, quote)).rejects.toThrow('preflight');
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('latches the existing missing-position reason after one unsuccessful confirmation', async () => {
+    const s = await openPosition();
+    try {
+      await s.engine.reconcile();
+      expect(s.engine.synchronized).toBe(false);
+      expect(s.kill.reasons).toEqual(['local position missing on exchange']);
+      expect(s.engine.positions.get('BTCUSDT')?.quantity).toBe(1);
+      expect(s.db.list('trades')).toHaveLength(0);
+      expect(s.executions).toHaveBeenCalledTimes(2);
+      expect(s.positions).toHaveBeenCalledTimes(2);
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it.each(['executions', 'positions'] as const)(
+    'keeps entries blocked if the additional %s GET fails',
+    async (method) => {
+      const s = await openPosition();
+      s[method]
+        .mockResolvedValueOnce([])
+        .mockRejectedValueOnce(new Error('confirmation GET failed'));
+      s.engine.synchronized = true;
+      try {
+        await expect(s.engine.reconcile()).rejects.toThrow('confirmation GET failed');
+        expect(s.engine.synchronized).toBe(false);
+        expect(s.kill.reasons).toContain('cannot determine account position');
+        expect(s.engine.positions.get('BTCUSDT')?.quantity).toBe(1);
+        expect(s.db.list('trades')).toHaveLength(0);
+        expect(s.create).toHaveBeenCalledOnce();
+        expect(s.cancel).not.toHaveBeenCalled();
+        expect(s.protection).not.toHaveBeenCalled();
+      } finally {
+        s.db.close();
+      }
+    },
+  );
+
+  it.each([
+    [{ symbol: 'ETHUSDT' }, 'unknown open exchange position'],
+    [{ size: '0.5' }, 'local/exchange position mismatch'],
+    [{ side: 'Sell' as const }, 'local/exchange position mismatch'],
+    [{ avgPrice: '101' }, 'local/exchange position mismatch'],
+    [{ stopLoss: '0' }, 'exchange position has missing protection'],
+    [{ takeProfit: '111' }, 'exchange protection differs from local state'],
+    [{ leverage: '100' }, 'exchange leverage exceeds configured limit'],
+    [{ positionIdx: 1 }, 'hedge mode unsupported; require one-way positions'],
+    [{ size: 'NaN' }, 'unknown position quantity'],
+  ] as const)('fully validates the refreshed position snapshot: %j', async (changes, reason) => {
+    const s = await openPosition();
+    s.positions.mockResolvedValueOnce([]).mockResolvedValue([{ ...remotePosition, ...changes }]);
+    try {
+      await s.engine.reconcile();
+      expect(s.engine.synchronized).toBe(false);
+      expect(s.kill.reasons).toContain(reason);
+      expect(s.executions).toHaveBeenCalledTimes(2);
+      expect(s.positions).toHaveBeenCalledTimes(2);
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('does not make extra GETs when the first position snapshot matches', async () => {
+    const s = await openPosition();
+    s.positions.mockResolvedValue([remotePosition]);
+    try {
+      await s.engine.reconcile();
+      expect(s.engine.synchronized).toBe(true);
+      expect(s.kill.active).toBe(false);
+      expect(s.executions).toHaveBeenCalledOnce();
+      expect(s.positions).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+});
+
 describe('authenticated execution safety', () => {
   it('blocks construction of live engine without both flags', () => {
     const s = setup();

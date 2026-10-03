@@ -44,6 +44,8 @@ const explanations: Record<string, string> = {
   'critical engine operation failed': 'Ошибка при обработке торгового события',
   'state mismatch': 'Данные бота и биржи не совпадают',
   'local/exchange position mismatch': 'Размер позиции у бота и на бирже не совпадает',
+  'local position missing on exchange':
+    'Локальная позиция не найдена на бирже; закрытие не подтверждено',
   'unknown active exchange order': 'На бирже обнаружен неизвестный боту ордер',
   'unknown open exchange position': 'На бирже обнаружена неизвестная боту позиция',
   'exchange position has missing protection': 'У позиции на бирже нет нужных защитных уровней',

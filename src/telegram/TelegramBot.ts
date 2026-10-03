@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Logger } from '../utils/logger.js';
-import { registerSecrets } from '../utils/logger.js';
-import { parseCommand, type Command } from './commands.js';
+import { registerSecrets, sanitize } from '../utils/logger.js';
+import { commandDescriptions, commands, parseCommand, type Command } from './commands.js';
 export interface TelegramUpdate {
   update_id: number;
   message?: { chat: { id: number }; text?: string };
@@ -105,6 +105,26 @@ export class TelegramBot {
       if (old.length) this.offset = old.at(-1)!.update_id + 1;
     } catch (err) {
       if (!this.stopped) this.logger.warn({ event: 'telegram.initialization.failed', error: err });
+    }
+    if (this.stopped) return;
+    try {
+      await this.request('setMyCommands', {
+        scope: { type: 'chat', chat_id: this.chatId },
+        commands: commands.map((command) => ({
+          command,
+          description: commandDescriptions[command],
+        })),
+      });
+      const privateChatId = Number(this.chatId);
+      if (!this.stopped && Number.isSafeInteger(privateChatId) && privateChatId > 0) {
+        await this.request('setChatMenuButton', {
+          chat_id: privateChatId,
+          menu_button: { type: 'commands' },
+        });
+      }
+    } catch (err) {
+      if (!this.stopped)
+        this.logger.warn({ event: 'telegram.commands.registration.failed', error: sanitize(err) });
     }
     while (!this.stopped) {
       try {

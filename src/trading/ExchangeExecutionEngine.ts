@@ -299,11 +299,14 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
       );
       if (Date.now() - earliest > 6 * 86400000)
         this.kill.activate('reconciliation history exceeds six days; manual audit required');
-      const executions = await this.client.executions(
-        Math.max(earliest - 60000, Date.now() - 6 * 86400000),
-      );
+      const startTime = Math.max(earliest - 60000, Date.now() - 6 * 86400000);
+      const executions = await this.client.executions(startTime);
       this.handleExecutions(executions);
       const orders = await this.client.orders();
+      // Confirmation fills may close a position after this order snapshot was fetched.
+      const knownProtectionIds = new Set(
+        orders.filter((order) => this.knownProtection(order)).map((order) => order.orderId),
+      );
       this.handleOrders(orders);
       // Recover a crash between a terminal close-order write and clearing its reservation.
       for (const order of this.orders.values()) this.releaseCloseReservation(order.id);
@@ -317,7 +320,16 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
         if (remote) this.handleOrders([remote]);
         else this.kill.activate('unresolved durable order intent');
       }
-      const positions = await this.client.positions();
+      let positions = await this.client.positions();
+      if (
+        [...this.positions.values()].some(
+          (local) =>
+            !positions.some((remote) => remote.symbol === local.symbol && Number(remote.size) > 0),
+        )
+      ) {
+        this.handleExecutions(await this.client.executions(startTime));
+        positions = await this.client.positions();
+      }
       this.balance = await this.client.equity();
       let mismatch = false;
       for (const remote of positions) {
@@ -378,7 +390,7 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
           (o) =>
             !this.orders.has(o.orderLinkId) &&
             ![...this.orders.values()].some((local) => local.exchangeId === o.orderId) &&
-            !this.knownProtection(o),
+            !knownProtectionIds.has(o.orderId),
         )
       )
         mismatch = true;

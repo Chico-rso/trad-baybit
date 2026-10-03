@@ -1,9 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TelegramBot } from '../../src/telegram/TelegramBot.js';
 import { createLogger, registerSecrets, sanitize } from '../../src/utils/logger.js';
-import { formatSignal } from '../../src/telegram/messages.js';
+import { formatSignal, formatStop, reasonText } from '../../src/telegram/messages.js';
 import { signal } from '../helpers.js';
 describe('Telegram command authorization and secrets', () => {
+  it('explains an unconfirmed missing exchange position in Russian', () => {
+    const explanation = 'Локальная позиция не найдена на бирже; закрытие не подтверждено';
+    expect(reasonText('local position missing on exchange')).toBe(explanation);
+    expect(formatStop(['local position missing on exchange'], 'demo')).toContain(explanation);
+  });
   it('retries a transient notification failure and stops the long poll cleanly', async () => {
     let updates = 0,
       sends = 0;
