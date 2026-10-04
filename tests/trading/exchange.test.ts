@@ -8,16 +8,17 @@ import { Journal } from '../../src/database/db.js';
 import { KillSwitch } from '../../src/risk/KillSwitch.js';
 import { createLogger } from '../../src/utils/logger.js';
 import { instrument, signal } from '../helpers.js';
-const setup = () => {
+const setup = (mode: 'testnet' | 'demo' = 'testnet') => {
   const c = parseEnv({
-    TRADING_MODE: 'testnet',
+    TRADING_MODE: mode,
+    DEMO_CONTINUOUS_TESTING: String(mode === 'demo'),
     BYBIT_API_KEY: 'test-key',
     BYBIT_API_SECRET: 'test-secret',
   });
   const db = new Journal(':memory:'),
     logger = createLogger('silent');
   const client = new BybitClient(new BybitRestClient(c, logger));
-  const kill = new KillSwitch(db, logger, 'testnet');
+  const kill = new KillSwitch(db, logger, mode);
   const engine = new ExchangeExecutionEngine(
     c,
     db,
@@ -38,8 +39,8 @@ const plan = {
   riskBudget: 25,
 };
 const quote = { bid: 99.9, ask: 100.1, timestamp: 1000, imbalance: 1 };
-const openPosition = async (filled = true) => {
-  const s = setup();
+const openPosition = async (filled = true, mode: 'testnet' | 'demo' = 'testnet') => {
+  const s = setup(mode);
   const now = Date.now();
   const create = vi
     .spyOn(s.client, 'createOrder')
@@ -107,6 +108,37 @@ const nativeStop = {
 };
 
 describe('confirmation of a position missing from the first exchange snapshot', () => {
+  it('recovers continuous DEMO when the stop fill arrives after both REST confirmation reads', async () => {
+    const s = await openPosition(true, 'demo');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(s.now);
+    const healthy = { status: 'HEALTHY' as const, reasons: [], timestamp: s.now };
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.reasons).toEqual(['local position missing on exchange']);
+      s.kill.recoverDemo(s.c, { ...healthy, status: 'UNHEALTHY' });
+      expect(s.kill.active).toBe(true);
+      s.engine.handleExecutions([s.close]);
+      expect(s.engine.positions.size).toBe(0);
+      await s.engine.reconcile();
+      expect(s.engine.synchronized).toBe(true);
+      s.kill.recoverDemo(s.c, healthy);
+      clock.mockReturnValue(s.now + 15000);
+      await s.engine.reconcile();
+      s.kill.recoverDemo(s.c, healthy);
+      expect(s.kill.active).toBe(true);
+      clock.mockReturnValue(s.now + 30000);
+      await s.engine.reconcile();
+      s.kill.recoverDemo(s.c, healthy);
+      expect(s.kill.active).toBe(false);
+      expect(s.db.list('trades')).toHaveLength(1);
+      expect(s.db.list('fills')).toHaveLength(2);
+      expect(s.create).toHaveBeenCalledOnce();
+      expect(s.cancel).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+      s.db.close();
+    }
+  });
   it.each([false, true])(
     'confirms an owned entry before its execution with native protection orders: %s',
     async (protectionOrders) => {

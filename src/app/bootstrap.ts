@@ -156,6 +156,7 @@ export async function bootstrap(c: Config) {
       privateData = new BybitPrivateData(c, logger);
       const exchange = execution;
       privateData.on('disconnected', () => {
+        kill.interruptRecovery();
         market.privateConnected = false;
         privateDisconnectedAt = Date.now();
         exchange.synchronized = false;
@@ -173,6 +174,7 @@ export async function bootstrap(c: Config) {
         engine.enqueue(async () => exchange.handleExecutions(fills)),
       );
       privateData.on('accountUpdate', () => {
+        kill.interruptRecovery();
         exchange.synchronized = false;
       });
       privateData.on('fault', () => logger.warn({ event: 'private.stream.fault' }));
@@ -210,6 +212,7 @@ export async function bootstrap(c: Config) {
         engine.enqueue(() => execution!.onTrade(trade));
     });
     publicData.on('disconnected', () => {
+      kill.interruptRecovery();
       publicDisconnectedAt = Date.now();
     });
     publicData.on('synchronized', () => {
@@ -254,6 +257,7 @@ export async function bootstrap(c: Config) {
           if (!db.healthy()) kill.activate('database unavailable');
           if (guard.blocked(engine.equity(), Date.now(), engine.tradingEquity()))
             kill.activate('daily loss limit');
+          if (execution instanceof ExchangeExecutionEngine) kill.recoverDemo(c, getHealth());
           if (execution)
             for (const symbol of c.SYMBOLS) {
               const quote = market.books.get(symbol)?.quote();
