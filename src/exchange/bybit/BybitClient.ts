@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type {
   Candle,
+  CandleInterval,
   Instrument,
   ExchangeOrder,
   ExchangePosition,
@@ -44,7 +45,12 @@ export class BybitClient {
       maxLeverage: Number(i.leverageFilter.maxLeverage),
     };
   }
-  async candles(symbol: string, interval: 1 | 5, limit = 1000, end?: number): Promise<Candle[]> {
+  async candles(
+    symbol: string,
+    interval: CandleInterval,
+    limit = 1000,
+    end?: number,
+  ): Promise<Candle[]> {
     const result = await this.rest.get<{ list: string[][] }>('/v5/market/kline', {
       category: 'linear',
       symbol,

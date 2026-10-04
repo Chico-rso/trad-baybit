@@ -21,22 +21,26 @@ export function moveProtection(
     return p;
   const initialRisk = Math.abs(p.entry - p.initialStopLoss),
     profit = (price - p.entry) * direction;
+  const policy = p.signal.protection;
   const costs = (p.entry * (config.TAKER_FEE_BPS * 2 + config.SLIPPAGE_BPS)) / 10000;
   const breakeven = Number(
     normalizePrice(p.entry + direction * costs, instrument.tickSize, long ? 'up' : 'down'),
   );
   const trigger = Math.max(
-    initialRisk * config.BREAKEVEN_TRIGGER_R,
+    initialRisk * (policy?.breakevenTriggerR ?? config.BREAKEVEN_TRIGGER_R),
     Math.abs(breakeven - p.entry) + tick,
   );
-  if (config.BREAKEVEN_ENABLED && !p.breakeven && profit >= trigger) {
+  if ((policy?.breakevenEnabled ?? config.BREAKEVEN_ENABLED) && !p.breakeven && profit >= trigger) {
     p.stopLoss = long ? Math.max(p.stopLoss, breakeven) : Math.min(p.stopLoss, breakeven);
     p.breakeven = true;
   }
-  if (config.TRAILING_STOP_ENABLED) {
+  if (policy?.trailingStopEnabled ?? config.TRAILING_STOP_ENABLED) {
     p.trailingAnchor = long ? Math.max(p.trailingAnchor, price) : Math.min(p.trailingAnchor, price);
     const candidate =
-      p.trailingAnchor - direction * p.signal.snapshot.atr * config.TRAILING_ATR_MULTIPLIER;
+      p.trailingAnchor -
+      direction *
+        p.signal.snapshot.atr *
+        (policy?.trailingAtrMultiplier ?? config.TRAILING_ATR_MULTIPLIER);
     const bounded = long ? Math.min(candidate, price - tick) : Math.max(candidate, price + tick);
     const stop = Number(normalizePrice(bounded, instrument.tickSize, long ? 'down' : 'up'));
     p.stopLoss = long ? Math.max(p.stopLoss, stop) : Math.min(p.stopLoss, stop);

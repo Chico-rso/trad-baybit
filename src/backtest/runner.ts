@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import type { Config } from '../config/env.js';
+import { strategyTimeframes, type Config } from '../config/env.js';
 import type { Candle, Instrument, Quote, Signal, Trade } from '../exchange/bybit/types.js';
 import { Journal } from '../database/db.js';
 import { createLogger } from '../utils/logger.js';
 import { PaperExecutionEngine } from '../trading/PaperExecutionEngine.js';
-import { ScalpingStrategy } from '../strategy/ScalpingStrategy.js';
+import { createStrategy } from '../strategy/createStrategy.js';
 import { PositionSizer, reservedMargin } from '../risk/PositionSizer.js';
 import { RiskManager } from '../risk/RiskManager.js';
 import { DailyLossGuard } from '../risk/DailyLossGuard.js';
@@ -46,10 +46,11 @@ export function validateHistory(input: unknown): Candle[] {
   }
   return bars;
 }
-export function aggregateFiveMinute(bars: Candle[]): Candle[] {
+export function aggregateCandles(bars: Candle[], interval: Candle['interval']): Candle[] {
+  const duration = interval * 60000;
   const groups = new Map<string, Candle[]>();
   for (const b of bars) {
-    const start = Math.floor(b.start / 300000) * 300000,
+    const start = Math.floor(b.start / duration) * duration,
       key = `${b.symbol}:${start}`;
     const group = groups.get(key) ?? [];
     group.push(b);
@@ -60,14 +61,14 @@ export function aggregateFiveMinute(bars: Candle[]): Candle[] {
     group.sort((a, b) => a.start - b.start);
     const first = group[0]!;
     if (
-      group.length !== 5 ||
-      first.start % 300000 !== 0 ||
-      !group.every((b, i) => b.confirmed && b.start === first.start + i * 60000)
+      group.length !== interval ||
+      first.start % duration !== 0 ||
+      !group.every((b, i) => b.interval === 1 && b.confirmed && b.start === first.start + i * 60000)
     )
       continue;
     result.push({
       symbol: first.symbol,
-      interval: 5,
+      interval,
       start: first.start,
       open: first.open,
       high: Math.max(...group.map((b) => b.high)),
@@ -79,6 +80,9 @@ export function aggregateFiveMinute(bars: Candle[]): Candle[] {
     });
   }
   return result.sort((a, b) => a.start - b.start);
+}
+export function aggregateFiveMinute(bars: Candle[]): Candle[] {
+  return aggregateCandles(bars, 5);
 }
 export async function runBacktest(
   input: Candle[],
@@ -100,12 +104,15 @@ export async function runBacktest(
     kill = new KillSwitch(db, logger, 'backtest'),
     risk = new RiskManager(c, guard, kill),
     sizer = new PositionSizer(c),
-    strategy = new ScalpingStrategy(c);
+    strategy = createStrategy(c);
+  const [entryInterval, trendInterval] = strategyTimeframes(c);
   const store = new CandleStore();
   const queued = new Map<string, Signal>();
   const curve: { timestamp: number; equity: number }[] = [];
-  const five = aggregateFiveMinute(bars);
-  let fiveIndex = 0;
+  const entries = entryInterval === 1 ? [] : aggregateCandles(bars, entryInterval);
+  const trends = aggregateCandles(bars, trendInterval);
+  let entryIndex = 0,
+    trendIndex = 0;
   let signals = 0;
   paper.on('closed', (trade: Trade) => guard.record(trade.netPnL, trade.exitTime));
   const quote = (price: number, time: number): Quote => ({
@@ -120,7 +127,8 @@ export async function runBacktest(
     pendingSymbols: paper.pendingSymbols(),
     healthy: true,
     marketFresh:
-      store.contiguous(symbol, 1, strategy.warmup) && store.contiguous(symbol, 5, strategy.warmup),
+      store.contiguous(symbol, entryInterval, strategy.warmup) &&
+      store.contiguous(symbol, trendInterval, strategy.warmup),
     paused: false,
     now,
   });
@@ -224,18 +232,24 @@ export async function runBacktest(
       }
       for (const bar of group) await paper.onQuote(bar.symbol, quote(bar.close, end), end);
       for (const bar of group) store.upsert(bar);
-      while (fiveIndex < five.length && five[fiveIndex]!.start + 300000 <= end)
-        store.upsert(five[fiveIndex++]!);
+      while (
+        entryIndex < entries.length &&
+        entries[entryIndex]!.start + entryInterval * 60000 <= end
+      )
+        store.upsert(entries[entryIndex++]!);
+      while (trendIndex < trends.length && trends[trendIndex]!.start + trendInterval * 60000 <= end)
+        store.upsert(trends[trendIndex++]!);
       for (const bar of group)
         if (
           end >= tradeFrom &&
-          store.contiguous(bar.symbol, 1, strategy.warmup) &&
-          store.contiguous(bar.symbol, 5, strategy.warmup)
+          store.get(bar.symbol, entryInterval).at(-1)?.start === end - entryInterval * 60000 &&
+          store.contiguous(bar.symbol, entryInterval, strategy.warmup) &&
+          store.contiguous(bar.symbol, trendInterval, strategy.warmup)
         ) {
           const candidates = strategy.evaluate(
             bar.symbol,
-            store.get(bar.symbol, 1),
-            store.get(bar.symbol, 5),
+            store.get(bar.symbol, entryInterval),
+            store.get(bar.symbol, trendInterval),
             quote(bar.close, end),
             end,
           );

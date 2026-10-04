@@ -10,6 +10,8 @@ const number = (v: number) =>
 const money = (v: number) => `${number(v)} USDT`;
 const direction = (side: Side) =>
   side === 'Long' ? 'покупка — расчёт на рост' : 'продажа — расчёт на снижение';
+export const strategyText = (name: 'scalping' | 'trend-pullback') =>
+  name === 'trend-pullback' ? 'Тренд и откат 15м / 1ч' : 'Скальпинг 1м / 5м';
 export function modeText(mode: Mode): string {
   return {
     signal: 'Только сигналы, без сделок',
@@ -27,6 +29,14 @@ const explanations: Record<string, string> = {
   volume: 'Объём торгов вырос',
   book: 'В заявках на бирже есть перевес в нужную сторону',
   spread: 'Разница между ценой покупки и продажи небольшая',
+  'hourly trend': 'Часовой тренд поддерживает направление входа',
+  'entry trend': 'Тренд на 15-минутном графике поддерживает вход',
+  pullback: 'Цена вернулась к средней после отката',
+  recovery: 'Закрытая свеча подтвердила возобновление движения',
+  extension: 'Цена входа остаётся достаточно близко к средней',
+  quote: 'Цена на бирже актуальна',
+  volatility: 'Размер движения подходит для защитного стопа',
+  costs: 'Планируемая цель покрывает комиссии и проскальзывание',
   'market data stale': 'Рыночные данные перестали обновляться вовремя',
   'market websocket disconnected too long': 'Связь с рыночными данными потеряна надолго',
   'private websocket disconnected too long': 'Связь с аккаунтом потеряна надолго',
@@ -67,6 +77,7 @@ export function formatSignal(s: Signal, mode: Mode, risk: number): string {
     `${s.side === 'Long' ? '🟢' : '🔴'} Сигнал: ${s.symbol}`,
     direction(s.side),
     `Режим: ${modeText(mode)}`,
+    ...(s.strategy ? [`Стратегия: ${strategyText(s.strategy)}`] : []),
     `Оценка условий: ${s.score}/100 — это баллы, не вероятность прибыли`,
     `Планируемый вход: ${money(s.entry)}`,
     `Ограничение убытка: ${money(s.stopLoss)}`,
@@ -139,6 +150,7 @@ export function formatStatus(s: ReturnType<TradingEngine['status']>): string {
   return [
     `${active}`,
     `Режим: ${modeText(s.mode)}`,
+    `Стратегия: ${strategyText(s.strategy)}`,
     `Состояние: ${formatHealth(s.health)}`,
     `Рыночные данные: ${s.connection.public ? 'подключены' : 'нет связи'}`,
     `Аккаунт: ${['signal', 'paper'].includes(s.mode) ? 'не используется для ордеров' : s.connection.private ? 'подключён' : 'нет связи'}`,
@@ -193,6 +205,12 @@ export function formatProfit(r: ProfitReport): string {
   return [
     '💰 Прибыль бота',
     modeText(r.mode),
+    ...(r.activeStrategy
+      ? [
+          `Текущая стратегия: ${strategyText(r.activeStrategy.name)}`,
+          `Результат этой стратегии: ${profitMoney(r.activeStrategy.totals.netPnL)}, закрыто ${r.activeStrategy.totals.totalTrades} сделок`,
+        ]
+      : []),
     '',
     'За всё время — завершённые сделки:',
     `Заработано на прибыльных: ${profitMoney(closed.winningPnL)}`,

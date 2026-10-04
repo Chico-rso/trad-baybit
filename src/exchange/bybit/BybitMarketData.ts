@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { z } from 'zod';
-import { endpoints, type Config } from '../../config/env.js';
+import { endpoints, strategyTimeframes, type Config } from '../../config/env.js';
 import type { MarketState } from '../../market/MarketState.js';
 import type { Logger } from '../../utils/logger.js';
-import type { Candle } from './types.js';
+import type { Candle, CandleInterval } from './types.js';
 import { BybitClient } from './BybitClient.js';
 import { BybitWebSocket, type WsMessage } from './BybitWebSocket.js';
 const numeric = z.union([z.string(), z.number()]).transform(Number).refine(Number.isFinite);
@@ -41,6 +41,9 @@ export class BybitMarketData extends EventEmitter {
   readonly ws: BybitWebSocket;
   private generation = 0;
   private stopped = false;
+  private readonly pendingEntries = new Map<string, Candle>();
+  private readonly trendFetches = new Set<string>();
+  private readonly intervals: readonly CandleInterval[];
   constructor(
     private readonly client: BybitClient,
     private readonly market: MarketState,
@@ -48,11 +51,11 @@ export class BybitMarketData extends EventEmitter {
     private readonly logger: Logger,
   ) {
     super();
+    this.intervals = [...new Set<CandleInterval>([1, ...strategyTimeframes(config)])];
     this.ws = new BybitWebSocket(
       endpoints(config).publicWs,
       config.SYMBOLS.flatMap((s) => [
-        `kline.1.${s}`,
-        `kline.5.${s}`,
+        ...this.intervals.map((interval) => `kline.${interval}.${s}`),
         `orderbook.50.${s}`,
         `publicTrade.${s}`,
       ]),
@@ -60,6 +63,8 @@ export class BybitMarketData extends EventEmitter {
     );
     this.ws.on('disconnected', () => {
       this.generation++;
+      this.pendingEntries.clear();
+      this.trendFetches.clear();
       market.invalidate();
       this.emit('disconnected');
     });
@@ -82,7 +87,7 @@ export class BybitMarketData extends EventEmitter {
     try {
       for (const symbol of this.config.SYMBOLS) {
         // Session VWAP uses all candles since 00:00 UTC; fetch up to 1440 bars.
-        for (const interval of [1, 5] as const) {
+        for (const interval of this.intervals) {
           const recent = await this.client.candles(symbol, interval, 1000);
           const oldest = recent[0];
           const day = Math.floor(Date.now() / 86400000) * 86400000;
@@ -95,6 +100,7 @@ export class BybitMarketData extends EventEmitter {
         }
         if (generation !== this.generation || this.stopped) return;
         this.market.synchronized.add(symbol);
+        this.flushEntry(symbol);
       }
       this.logger.info({ event: 'market.synchronized', symbols: this.config.SYMBOLS });
       this.emit('synchronized');
@@ -111,8 +117,8 @@ export class BybitMarketData extends EventEmitter {
         const symbol = msg.topic.split('.')[2]!;
         if (!this.market.books.has(symbol)) return;
         for (const c of klineSchema.parse(msg.data)) {
-          const interval = Number(c.interval);
-          if (interval !== 1 && interval !== 5) continue;
+          const interval = Number(c.interval) as CandleInterval;
+          if (!this.intervals.includes(interval)) continue;
           const candle: Candle = {
             symbol,
             interval,
@@ -125,7 +131,17 @@ export class BybitMarketData extends EventEmitter {
             turnover: c.turnover,
             confirmed: c.confirm,
           };
-          if (this.market.candles.upsert(candle) && interval === 1) this.emit('candle', candle);
+          const added = this.market.candles.upsert(candle);
+          const [entryInterval, trendInterval] = strategyTimeframes(this.config);
+          if (added && interval === entryInterval) {
+            if (this.config.STRATEGY === 'trend-pullback') {
+              const existing = this.pendingEntries.get(symbol);
+              if (!existing || existing.start < candle.start)
+                this.pendingEntries.set(symbol, candle);
+              if (!this.flushEntry(symbol)) void this.fetchTrend(candle);
+            } else this.emit('candle', candle);
+          }
+          if (interval === trendInterval && candle.confirmed) this.flushEntry(symbol);
         }
       } else if (msg.topic?.startsWith('orderbook.')) {
         const b = bookSchema.parse(msg.data);
@@ -162,9 +178,56 @@ export class BybitMarketData extends EventEmitter {
       this.ws.forceReconnect();
     }
   }
+  // A 15m close and the corresponding hourly close can arrive in either order.
+  // Never evaluate against the previous hour just because it is still within
+  // delivery grace. REST fills the bar immediately if the WS packet is delayed.
+  private flushEntry(symbol: string): boolean {
+    const entry = this.pendingEntries.get(symbol);
+    if (!entry) return true;
+    const [, trendInterval] = strategyTimeframes(this.config);
+    const end = entry.start + entry.interval * 60000;
+    const now = Date.now();
+    const trendDuration = trendInterval * 60000;
+    const expected = Math.floor(end / trendDuration) * trendDuration - trendDuration;
+    const latest = this.market.candles.get(symbol, trendInterval).at(-1);
+    if (now - end > this.config.CANDLE_STALE_MS || (latest && latest.start > expected)) {
+      this.pendingEntries.delete(symbol);
+      return true;
+    }
+    if (now < end || latest?.start !== expected) return false;
+    this.pendingEntries.delete(symbol);
+    this.emit('candle', entry);
+    return true;
+  }
+  private async fetchTrend(entry: Candle): Promise<void> {
+    const generation = this.generation;
+    const [, trendInterval] = strategyTimeframes(this.config);
+    const key = `${generation}:${entry.symbol}:${entry.start}`;
+    if (this.trendFetches.has(key)) return;
+    this.trendFetches.add(key);
+    try {
+      const bars = await this.client.candles(
+        entry.symbol,
+        trendInterval,
+        2,
+        entry.start + entry.interval * 60000 - 1,
+      );
+      if (generation !== this.generation || this.stopped) return;
+      for (const bar of bars) this.market.candles.upsert(bar);
+      this.flushEntry(entry.symbol);
+    } catch (err) {
+      if (generation !== this.generation || this.stopped) return;
+      this.logger.warn({ event: 'market.trend.sync.failed', symbol: entry.symbol, error: err });
+      this.emit('fault', err);
+    } finally {
+      this.trendFetches.delete(key);
+    }
+  }
   stop(): void {
     this.stopped = true;
     this.generation++;
+    this.pendingEntries.clear();
+    this.trendFetches.clear();
     this.ws.stop();
   }
 }

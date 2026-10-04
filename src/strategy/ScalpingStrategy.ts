@@ -96,6 +96,7 @@ export class ScalpingStrategy {
         hard.push('risk reward too low');
       return {
         id: randomUUID(),
+        strategy: 'scalping',
         symbol,
         timestamp,
         candleStart: last.start,

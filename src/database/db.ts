@@ -54,7 +54,12 @@ export class Journal {
     const rows = mode ? this.db.prepare(query).all(mode, limit) : this.db.prepare(query).all(limit);
     return (rows as { payload: string }[]).map((r) => JSON.parse(r.payload) as T);
   }
-  profitTotals(mode: string, since = 0, until = Number.MAX_SAFE_INTEGER): ClosedProfit {
+  profitTotals(
+    mode: string,
+    since = 0,
+    until = Number.MAX_SAFE_INTEGER,
+    strategy?: string,
+  ): ClosedProfit {
     return this.db
       .prepare(
         `
@@ -65,6 +70,7 @@ export class Journal {
         WHERE mode = ?
           AND json_extract(payload, '$.exitTime') >= ?
           AND json_extract(payload, '$.exitTime') < ?
+          AND (? IS NULL OR coalesce(json_extract(payload, '$.strategy'), 'scalping') = ?)
       )
       SELECT count(*) AS totalTrades,
              coalesce(sum(CASE WHEN netPnL > 0 THEN 1 ELSE 0 END), 0) AS wins,
@@ -77,7 +83,7 @@ export class Journal {
       FROM closed
     `,
       )
-      .get(mode, since, until) as unknown as ClosedProfit;
+      .get(mode, since, until, strategy ?? null, strategy ?? null) as unknown as ClosedProfit;
   }
   setState(id: string, value: unknown): void {
     this.db

@@ -1,6 +1,8 @@
+export type CandleInterval = 1 | 5 | 15 | 60;
+
 export interface Candle {
   symbol: string;
-  interval: 1 | 5;
+  interval: CandleInterval;
   start: number;
   open: number;
   high: number;
@@ -38,6 +40,13 @@ export type Side = 'Long' | 'Short';
 export type ExitReason =
   'take_profit' | 'stop_loss' | 'manual' | 'strategy_exit' | 'daily_guard' | 'shutdown';
 export interface Signal {
+  strategy?: 'scalping' | 'trend-pullback';
+  protection?: {
+    breakevenEnabled: boolean;
+    breakevenTriggerR: number;
+    trailingStopEnabled: boolean;
+    trailingAtrMultiplier: number;
+  };
   id: string;
   symbol: string;
   timestamp: number;
@@ -121,6 +130,7 @@ export interface Fill {
   timestamp: number;
 }
 export interface Trade {
+  strategy?: 'scalping' | 'trend-pullback';
   id: string;
   mode: string;
   symbol: string;

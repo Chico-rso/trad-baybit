@@ -1,4 +1,4 @@
-import type { Config } from '../config/env.js';
+import { strategyTimeframes, type Config } from '../config/env.js';
 import type { Journal } from '../database/db.js';
 import type { Logger } from '../utils/logger.js';
 import type { MarketState } from '../market/MarketState.js';
@@ -97,8 +97,17 @@ export class TradingEngine {
   async processCandle(candle: Candle, now = Date.now()): Promise<void> {
     const c = this.config,
       symbol = candle.symbol;
+    if (
+      !candle.confirmed ||
+      candle.interval !== strategyTimeframes(c)[0] ||
+      candle.start + candle.interval * 60000 > now
+    )
+      return;
     if (!this.accepting || this.getHealth().status !== 'HEALTHY') return;
-    const key = `candle:${c.TRADING_MODE}:${symbol}`;
+    const key =
+      c.STRATEGY === 'scalping'
+        ? `candle:${c.TRADING_MODE}:${symbol}`
+        : `candle:${c.TRADING_MODE}:${c.STRATEGY}:${symbol}`;
     const previous = this.db.state<number>(key);
     if (previous !== undefined && previous >= candle.start) return;
     const candidates = this.signals.evaluate(symbol, now);
@@ -130,6 +139,7 @@ export class TradingEngine {
         c.MARKET_STALE_MS,
         c.CANDLE_STALE_MS,
         this.signals.strategy.warmup,
+        strategyTimeframes(c),
       ),
       paused: this.paused || !this.accepting,
       now,
@@ -213,6 +223,7 @@ export class TradingEngine {
   status() {
     return {
       mode: this.config.TRADING_MODE,
+      strategy: this.config.STRATEGY,
       network:
         this.config.TRADING_MODE === 'live'
           ? 'mainnet'
@@ -242,7 +253,7 @@ export class TradingEngine {
     const date = new Date(now);
     const midnight = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
     const health = this.getHealth();
-    return buildProfitReport({
+    const report = buildProfitReport({
       mode: this.config.TRADING_MODE,
       allTime: this.db.profitTotals(this.config.TRADING_MODE),
       today: this.db.profitTotals(this.config.TRADING_MODE, midnight, midnight + 86400000),
@@ -258,6 +269,18 @@ export class TradingEngine {
       ),
       initialCapital: this.config.TRADING_CAPITAL_USDT,
     });
+    return {
+      ...report,
+      activeStrategy: {
+        name: this.config.STRATEGY,
+        totals: this.db.profitTotals(
+          this.config.TRADING_MODE,
+          0,
+          Number.MAX_SAFE_INTEGER,
+          this.config.STRATEGY,
+        ),
+      },
+    };
   }
   resources() {
     return {

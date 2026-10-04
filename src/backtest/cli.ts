@@ -29,6 +29,7 @@ try {
     ...(process.argv.includes('--order-type')
       ? { ENTRY_ORDER_TYPE: arg('--order-type', 'Limit') }
       : {}),
+    ...(process.argv.includes('--strategy') ? { STRATEGY: arg('--strategy', 'scalping') } : {}),
   });
   const bars = validateHistory(JSON.parse(readFileSync(file, 'utf8')));
   const raw = z
@@ -67,6 +68,7 @@ try {
     syntheticDemo: file === 'fixtures/demo-candles.json',
     validationStart: new Date(boundary).toISOString(),
     parameters: {
+      strategy: c.STRATEGY,
       orderType: c.ENTRY_ORDER_TYPE,
       riskPercent: c.RISK_PER_TRADE_PERCENT,
       minScore: c.MIN_SIGNAL_SCORE,

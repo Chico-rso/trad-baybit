@@ -130,6 +130,7 @@ export class PositionLedger extends EventEmitter {
     if (closed) {
       p.closed = true;
       trade = {
+        strategy: p.signal.strategy ?? 'scalping',
         id: p.id,
         mode: this.mode,
         symbol: p.symbol,

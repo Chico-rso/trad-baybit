@@ -68,9 +68,11 @@ export class PositionSizer {
       throw new Error('Invalid protective prices');
     if (reward / distance < this.c.MIN_RR) throw new Error('Normalized risk reward below minimum');
     const entryFee =
-      this.c.ENTRY_ORDER_TYPE === 'Limit' && this.c.POST_ONLY
-        ? this.c.MAKER_FEE_BPS
-        : this.c.TAKER_FEE_BPS;
+      signal.strategy === 'trend-pullback'
+        ? this.c.TAKER_FEE_BPS
+        : this.c.ENTRY_ORDER_TYPE === 'Limit' && this.c.POST_ONLY
+          ? this.c.MAKER_FEE_BPS
+          : this.c.TAKER_FEE_BPS;
     const roundingAllowance =
       this.c.SLIPPAGE_BPS > 0
         ? Number(instrument.tickSize) * (this.c.ENTRY_ORDER_TYPE === 'Market' ? 2 : 1)
@@ -80,6 +82,15 @@ export class PositionSizer {
       .plus(roundingAllowance);
     if (new Decimal(reward).lte(costs))
       throw new Error('Take-profit reward does not cover estimated round-trip costs');
+    if (
+      signal.strategy === 'trend-pullback' &&
+      (new Decimal(reward)
+        .minus(costs)
+        .div(new Decimal(distance).plus(costs))
+        .lt(this.c.PULLBACK_MIN_NET_RR) ||
+        new Decimal(distance).lt(costs.mul(3)))
+    )
+      throw new Error('Normalized net risk reward below pullback minimum');
     const perUnit = new Decimal(distance).plus(costs);
     const budget = new Decimal(equity).mul(this.c.RISK_PER_TRADE_PERCENT).div(100);
     const riskQty = budget.div(perUnit);

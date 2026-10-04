@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import type { Config } from '../config/env.js';
+import { strategyTimeframes, type Config } from '../config/env.js';
 import { createLogger, registerSecrets } from '../utils/logger.js';
 import { Journal } from '../database/db.js';
 import { MarketState } from '../market/MarketState.js';
@@ -236,6 +236,7 @@ export async function bootstrap(c: Config) {
                   c.MARKET_STALE_MS,
                   c.CANDLE_STALE_MS,
                   engine.signals.strategy.warmup,
+                  strategyTimeframes(c),
                 )
               );
             })

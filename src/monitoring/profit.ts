@@ -13,6 +13,7 @@ export interface ClosedProfit {
 }
 
 export interface ProfitReport {
+  activeStrategy?: { name: 'scalping' | 'trend-pullback'; totals: ClosedProfit };
   mode: Mode;
   allTime: ClosedProfit;
   today: ClosedProfit;

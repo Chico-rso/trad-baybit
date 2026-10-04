@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CandleInterval } from '../exchange/bybit/types.js';
 
 const bool = (fallback: boolean) =>
   z
@@ -14,6 +15,13 @@ const schema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error', 'silent']).default('info'),
   TRADING_MODE: z.enum(['signal', 'paper', 'testnet', 'demo', 'live']).default('signal'),
   ENABLE_LIVE_TRADING: bool(false),
+  STRATEGY: z.enum(['scalping', 'trend-pullback']).default('scalping'),
+  PULLBACK_LOOKBACK: integer(4, 1, 12),
+  PULLBACK_SL_ATR: num(1.5, 0.5, 5),
+  PULLBACK_REWARD_R: num(2.5, 2, 5),
+  PULLBACK_MIN_NET_RR: num(1.5, 1, 4),
+  PULLBACK_MAX_EXTENSION_ATR: num(1.5, 0.25, 4),
+  PULLBACK_MIN_TREND_ATR: num(0.25, 0.05, 2),
   DEMO_CONTINUOUS_TESTING: bool(false),
   MARKET_DATA_NETWORK: z.enum(['testnet', 'mainnet']).default('testnet'),
   BYBIT_API_KEY: z.string().default(''),
@@ -89,6 +97,9 @@ const schema = z.object({
 });
 export type Config = z.infer<typeof schema>;
 export type Mode = Config['TRADING_MODE'];
+export function strategyTimeframes(c: Config): readonly [CandleInterval, CandleInterval] {
+  return c.STRATEGY === 'trend-pullback' ? [15, 60] : [1, 5];
+}
 export function runtimeConfig(raw: Record<string, unknown>, requestedMode?: string): Config {
   if (requestedMode === 'live' && raw.TRADING_MODE !== 'live') {
     throw new Error('LIVE requires explicit TRADING_MODE=live in ENV; CLI cannot substitute it');

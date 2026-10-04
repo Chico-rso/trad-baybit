@@ -1,4 +1,4 @@
-import type { Candle } from '../exchange/bybit/types.js';
+import type { Candle, CandleInterval } from '../exchange/bybit/types.js';
 export class CandleStore {
   private readonly candles = new Map<string, Candle[]>();
   constructor(private readonly capacity = 1500) {}
@@ -13,10 +13,10 @@ export class CandleStore {
     this.candles.set(key, list.slice(-this.capacity));
     return old < 0;
   }
-  get(symbol: string, interval: 1 | 5): Candle[] {
+  get(symbol: string, interval: CandleInterval): Candle[] {
     return this.candles.get(`${symbol}:${interval}`) ?? [];
   }
-  contiguous(symbol: string, interval: 1 | 5, count: number): boolean {
+  contiguous(symbol: string, interval: CandleInterval, count: number): boolean {
     const list = this.get(symbol, interval).slice(-count);
     return (
       list.length >= count &&

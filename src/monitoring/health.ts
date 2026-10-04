@@ -1,4 +1,4 @@
-import type { Config } from '../config/env.js';
+import { strategyTimeframes, type Config } from '../config/env.js';
 import type { Journal } from '../database/db.js';
 import type { MarketState } from '../market/MarketState.js';
 export interface Health {
@@ -24,7 +24,16 @@ export function health(
     reasons.push('REST connectivity stale');
   if (!stateSynchronized) reasons.push('account state unsynchronized');
   for (const symbol of c.SYMBOLS)
-    if (!market.ready(symbol, now, c.MARKET_STALE_MS, c.CANDLE_STALE_MS, warmup))
+    if (
+      !market.ready(
+        symbol,
+        now,
+        c.MARKET_STALE_MS,
+        c.CANDLE_STALE_MS,
+        warmup,
+        strategyTimeframes(c),
+      )
+    )
       reasons.push(`${symbol}: market unsynchronized or stale`);
   return {
     status:

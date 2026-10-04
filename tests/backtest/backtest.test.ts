@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { aggregateFiveMinute, validateHistory, runBacktest } from '../../src/backtest/runner.js';
+import * as runner from '../../src/backtest/runner.js';
 import { tradeStats } from '../../src/monitoring/metrics.js';
 import { parseEnv } from '../../src/config/env.js';
 import { instrument } from '../helpers.js';
@@ -20,6 +21,29 @@ const bars: Candle[] = Array.from({ length: 600 }, (_, i) => {
   };
 });
 describe('historical replay without lookahead', () => {
+  it('aggregates only complete 15m and 1h candles independently for each symbol', () => {
+    const aggregate = runner.aggregateCandles;
+    const twoSymbols = bars.slice(0, 60).flatMap((bar) => [bar, { ...bar, symbol: 'ETHUSDT' }]);
+    expect(aggregate(twoSymbols, 15)).toHaveLength(8);
+    const hourly = aggregate(twoSymbols, 60);
+    expect(hourly).toHaveLength(2);
+    expect(hourly.map((bar) => bar.symbol).sort()).toEqual(['BTCUSDT', 'ETHUSDT']);
+    expect(hourly[0]).toMatchObject({ interval: 60, start: 0, close: bars[59]!.close });
+    expect(aggregate(bars.slice(0, 59), 60)).toHaveLength(0);
+    expect(aggregate(bars.slice(1, 61), 60)).toHaveLength(0);
+    expect(
+      aggregate(
+        bars.slice(0, 60).filter((_, index) => index !== 17),
+        60,
+      ),
+    ).toHaveLength(0);
+    expect(
+      aggregate(
+        bars.slice(0, 60).map((bar, index) => ({ ...bar, confirmed: index !== 17 })),
+        60,
+      ),
+    ).toHaveLength(0);
+  });
   it('creates 5m confirmation only from five contiguous completed bars', () => {
     expect(aggregateFiveMinute(bars.slice(0, 4))).toHaveLength(0);
     const five = aggregateFiveMinute(bars.slice(0, 5));

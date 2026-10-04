@@ -1,21 +1,22 @@
-import type { Config } from '../config/env.js';
+import { strategyTimeframes, type Config } from '../config/env.js';
 import type { MarketState } from '../market/MarketState.js';
-import { ScalpingStrategy } from './ScalpingStrategy.js';
+import { createStrategy } from './createStrategy.js';
 export class SignalEngine {
-  readonly strategy: ScalpingStrategy;
+  readonly strategy: ReturnType<typeof createStrategy>;
   constructor(
-    c: Config,
+    private readonly c: Config,
     private readonly market: MarketState,
   ) {
-    this.strategy = new ScalpingStrategy(c);
+    this.strategy = createStrategy(c);
   }
   evaluate(symbol: string, now = Date.now()) {
     const quote = this.market.books.get(symbol)?.quote();
+    const [entry, trend] = strategyTimeframes(this.c);
     return quote
       ? this.strategy.evaluate(
           symbol,
-          this.market.candles.get(symbol, 1),
-          this.market.candles.get(symbol, 5),
+          this.market.candles.get(symbol, entry),
+          this.market.candles.get(symbol, trend),
           quote,
           now,
         )
