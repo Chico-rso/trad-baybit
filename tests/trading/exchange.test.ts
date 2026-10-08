@@ -106,36 +106,305 @@ const nativeStop = {
   orderType: 'Market' as const,
   stopOrderType: 'StopLoss',
 };
+const ownedEntryOrder = (s: Awaited<ReturnType<typeof openPosition>>) => ({
+  ...nativeStop,
+  orderId: s.entry.orderId,
+  orderLinkId: s.entry.orderLinkId,
+  side: 'Buy' as const,
+  reduceOnly: false,
+  stopOrderType: undefined,
+  orderStatus: 'Filled',
+  cumExecQty: '1',
+});
 
-describe('confirmation of a position missing from the first exchange snapshot', () => {
-  it('recovers continuous DEMO when the stop fill arrives after both REST confirmation reads', async () => {
-    const s = await openPosition(true, 'demo');
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(s.now);
-    const healthy = { status: 'HEALTHY' as const, reasons: [], timestamp: s.now };
+describe('bounded confirmation of delayed executions in continuous DEMO', () => {
+  it.each([false, true])(
+    'lets the queue account an owned entry after both REST reads, with native protection: %s',
+    async (protectionOrders) => {
+      const s = await openPosition(false, 'demo');
+      s.engine.setPreflight(() => s.engine.synchronized);
+      vi.spyOn(s.client, 'findOrder').mockResolvedValue(ownedEntryOrder(s));
+      if (protectionOrders) vi.mocked(s.client.orders).mockResolvedValue([nativeStop]);
+      s.positions.mockResolvedValue([remotePosition]);
+      try {
+        await s.engine.reconcile();
+        expect(s.kill.reasons).toEqual([]);
+        expect(s.engine.synchronized).toBe(false);
+        expect(s.db.state('reconcile:demo')).toEqual(
+          expect.objectContaining({ synchronized: false }),
+        );
+        expect(s.db.state('reconcilePending:demo')).toEqual(
+          expect.objectContaining({ since: expect.any(Number) }),
+        );
+        await expect(
+          s.engine.submit({ ...signal, symbol: 'ETHUSDT' }, plan, quote),
+        ).rejects.toThrow('preflight');
+        // Private stop/target updates can be queued ahead of the entry execution.
+        s.engine.handleOrders([
+          nativeStop,
+          { ...nativeStop, orderId: 'late-target', stopOrderType: 'TakeProfit' },
+        ]);
+        expect(s.kill.reasons).toEqual([]);
+        s.engine.handleExecutions([s.entry, s.entry]);
+        await s.engine.reconcile();
+        expect(s.engine.synchronized).toBe(true);
+        expect(s.kill.active).toBe(false);
+        expect(s.engine.positions.get('BTCUSDT')?.quantity).toBe(1);
+        expect(s.db.list('fills')).toHaveLength(1);
+        expect(s.db.state('reconcilePending:demo')).toBeNull();
+        expect(s.create).toHaveBeenCalledOnce();
+        expect(s.cancel).not.toHaveBeenCalled();
+        expect(s.protection).not.toHaveBeenCalled();
+      } finally {
+        s.db.close();
+      }
+    },
+  );
+
+  it('defers a partial owned entry until its second fill is processed', async () => {
+    const s = await openPosition(false, 'demo');
+    s.engine.handleExecutions([{ ...s.entry, execId: 'first-half', execQty: '0.5' }]);
+    vi.mocked(s.client.orders).mockResolvedValue([ownedEntryOrder(s), nativeStop]);
+    s.positions.mockResolvedValue([remotePosition]);
     try {
       await s.engine.reconcile();
-      expect(s.kill.reasons).toEqual(['local position missing on exchange']);
-      s.kill.recoverDemo(s.c, { ...healthy, status: 'UNHEALTHY' });
-      expect(s.kill.active).toBe(true);
+      expect(s.kill.active).toBe(false);
+      expect(s.engine.synchronized).toBe(false);
+      s.engine.handleExecutions([{ ...s.entry, execId: 'second-half', execQty: '0.5' }]);
+      await s.engine.reconcile();
+      expect(s.engine.synchronized).toBe(true);
+      expect(s.kill.active).toBe(false);
+      expect(s.db.list('fills')).toHaveLength(2);
+      expect(s.engine.positions.get('BTCUSDT')?.quantity).toBe(1);
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('confirms an expected fill deficit even when the first position snapshot matches', async () => {
+    const s = await openPosition(false, 'demo');
+    s.engine.handleExecutions([{ ...s.entry, execId: 'first-half', execQty: '0.5' }]);
+    vi.mocked(s.client.orders).mockResolvedValue([ownedEntryOrder(s)]);
+    s.positions.mockResolvedValue([{ ...remotePosition, size: '0.5' }]);
+    s.executions
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{ ...s.entry, execId: 'second-half', execQty: '0.5' }]);
+    s.positions
+      .mockResolvedValueOnce([{ ...remotePosition, size: '0.5' }])
+      .mockResolvedValue([remotePosition]);
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.active).toBe(false);
+      expect(s.engine.synchronized).toBe(true);
+      expect(s.db.list('fills')).toHaveLength(2);
+      expect(s.executions).toHaveBeenCalledTimes(2);
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it('waits for a real close without inventing a trade or clearing unrelated protection', async () => {
+    const s = await openPosition(true, 'demo');
+    s.kill.activate('operator audit required');
+    vi.mocked(s.client.orders).mockResolvedValue([nativeStop]);
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.reasons).toEqual(['operator audit required']);
+      expect(s.engine.synchronized).toBe(false);
+      expect(s.db.list('trades')).toHaveLength(0);
+      s.engine.handleExecutions([s.close, s.close]);
+      vi.mocked(s.client.orders).mockResolvedValue([]);
+      await s.engine.reconcile();
+      expect(s.engine.synchronized).toBe(true);
+      expect(s.kill.reasons).toEqual(['operator audit required']);
+      expect(s.db.list('trades')).toHaveLength(1);
+      expect(s.db.list('fills')).toHaveLength(2);
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it.each(['entry', 'exit'] as const)(
+    'expires unresolved %s confirmation without renewing its deadline on restart',
+    async (kind) => {
+      const s = await openPosition(kind === 'exit', 'demo');
+      if (kind === 'entry') {
+        vi.spyOn(s.client, 'findOrder').mockResolvedValue(ownedEntryOrder(s));
+        s.positions.mockResolvedValue([remotePosition]);
+      }
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(s.now);
+      try {
+        await s.engine.reconcile();
+        expect(s.kill.active).toBe(false);
+        clock.mockReturnValue(s.now + 15000);
+        await s.engine.reconcile();
+        expect(s.kill.active).toBe(false);
+        expect(s.db.state('reconcilePending:demo')).toEqual(
+          expect.objectContaining({ since: s.now }),
+        );
+        const restored = new ExchangeExecutionEngine(
+          s.c,
+          s.db,
+          createLogger('silent'),
+          new Map([['BTCUSDT', instrument]]),
+          s.client,
+          s.kill,
+        );
+        clock.mockReturnValue(s.now + 30000);
+        await restored.reconcile();
+        expect(s.kill.reasons).toContain(
+          kind === 'entry'
+            ? 'unknown open exchange position'
+            : 'local position missing on exchange',
+        );
+        expect(restored.synchronized).toBe(false);
+        expect(s.db.list('trades')).toHaveLength(0);
+        expect(s.create).toHaveBeenCalledOnce();
+      } finally {
+        clock.mockRestore();
+        s.db.close();
+      }
+    },
+  );
+
+  it('keeps an unresolved fill deficit blocked and latches it at the deadline', async () => {
+    const s = await openPosition(false, 'demo');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(s.now);
+    s.engine.handleExecutions([{ ...s.entry, execId: 'first-half', execQty: '0.5' }]);
+    vi.mocked(s.client.orders).mockResolvedValue([ownedEntryOrder(s)]);
+    s.positions.mockResolvedValue([{ ...remotePosition, size: '0.5' }]);
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.active).toBe(false);
+      expect(s.engine.synchronized).toBe(false);
+      clock.mockReturnValue(s.now + 30000);
+      await s.engine.reconcile();
+      expect(s.engine.synchronized).toBe(false);
+      expect(s.kill.reasons).toEqual(['order fills not fully reconciled']);
+      expect(s.db.list('fills')).toHaveLength(1);
+      expect(s.create).toHaveBeenCalledOnce();
+    } finally {
+      clock.mockRestore();
+      s.db.close();
+    }
+  });
+
+  it('blocks a genuine unknown active order alongside a pending owned entry and native stop', async () => {
+    const s = await openPosition(false, 'demo');
+    vi.spyOn(s.client, 'findOrder').mockResolvedValue(ownedEntryOrder(s));
+    vi.mocked(s.client.orders).mockResolvedValue([
+      nativeStop,
+      { ...nativeStop, orderId: 'unknown-entry', reduceOnly: false },
+    ]);
+    s.positions.mockResolvedValue([remotePosition]);
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.reasons).toEqual(['unknown active exchange order']);
+      expect(s.engine.synchronized).toBe(false);
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it.each(['other symbol', 'not reduce-only', 'expired'] as const)(
+    'does not extend pending native protection ownership to an unsafe private update: %s',
+    async (kind) => {
+      const s = await openPosition(false, 'demo');
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(s.now);
+      vi.spyOn(s.client, 'findOrder').mockResolvedValue(ownedEntryOrder(s));
+      s.positions.mockResolvedValue([remotePosition]);
+      try {
+        await s.engine.reconcile();
+        expect(s.kill.active).toBe(false);
+        if (kind === 'expired') clock.mockReturnValue(s.now + 30000);
+        s.engine.handleOrders([
+          {
+            ...nativeStop,
+            symbol: kind === 'other symbol' ? 'ETHUSDT' : 'BTCUSDT',
+            reduceOnly: kind !== 'not reduce-only',
+          },
+        ]);
+        expect(s.kill.reasons).toEqual(['unknown active exchange order']);
+        expect(s.engine.synchronized).toBe(false);
+      } finally {
+        clock.mockRestore();
+        s.db.close();
+      }
+    },
+  );
+
+  it('preserves immediate latching in DEMO when continuous testing is disabled', async () => {
+    const s = await openPosition(false, 'demo');
+    const c = { ...s.c, DEMO_CONTINUOUS_TESTING: false };
+    const engine = new ExchangeExecutionEngine(
+      c,
+      s.db,
+      createLogger('silent'),
+      new Map([['BTCUSDT', instrument]]),
+      s.client,
+      s.kill,
+    );
+    vi.spyOn(s.client, 'findOrder').mockResolvedValue(ownedEntryOrder(s));
+    s.positions.mockResolvedValue([remotePosition]);
+    try {
+      await engine.reconcile();
+      expect(s.kill.reasons).toContain('unknown open exchange position');
+      expect(engine.synchronized).toBe(false);
+      expect(s.db.state('reconcilePending:demo')).toBeUndefined();
+    } finally {
+      s.db.close();
+    }
+  });
+
+  it.each([
+    [{ symbol: 'ETHUSDT' }, 'unknown open exchange position'],
+    [{ side: 'Sell' as const }, 'unknown open exchange position'],
+    [{ size: '2' }, 'unknown open exchange position'],
+    [{ avgPrice: 'NaN' }, 'local/exchange position mismatch'],
+    [{ stopLoss: '0' }, 'exchange position has missing protection'],
+    [{ takeProfit: '111' }, 'exchange protection differs from local state'],
+    [{ leverage: '100' }, 'exchange leverage exceeds configured limit'],
+    [{ leverage: 'NaN' }, 'exchange leverage exceeds configured limit'],
+    [{ positionIdx: 1 }, 'hedge mode unsupported; require one-way positions'],
+  ] as const)(
+    'immediately blocks an unsafe pending entry snapshot: %j',
+    async (changes, reason) => {
+      const s = await openPosition(false, 'demo');
+      vi.spyOn(s.client, 'findOrder').mockResolvedValue(ownedEntryOrder(s));
+      s.positions.mockResolvedValue([{ ...remotePosition, ...changes }]);
+      try {
+        await s.engine.reconcile();
+        expect(s.engine.synchronized).toBe(false);
+        expect(s.kill.reasons).toContain(reason);
+        expect(s.db.list('fills')).toHaveLength(0);
+        expect(s.create).toHaveBeenCalledOnce();
+      } finally {
+        s.db.close();
+      }
+    },
+  );
+});
+
+describe('confirmation of a position missing from the first exchange snapshot', () => {
+  it('confirms continuous DEMO without a kill when the stop fill arrives after both REST reads', async () => {
+    const s = await openPosition(true, 'demo');
+    try {
+      await s.engine.reconcile();
+      expect(s.kill.active).toBe(false);
+      expect(s.engine.synchronized).toBe(false);
       s.engine.handleExecutions([s.close]);
       expect(s.engine.positions.size).toBe(0);
       await s.engine.reconcile();
       expect(s.engine.synchronized).toBe(true);
-      s.kill.recoverDemo(s.c, healthy);
-      clock.mockReturnValue(s.now + 15000);
-      await s.engine.reconcile();
-      s.kill.recoverDemo(s.c, healthy);
-      expect(s.kill.active).toBe(true);
-      clock.mockReturnValue(s.now + 30000);
-      await s.engine.reconcile();
-      s.kill.recoverDemo(s.c, healthy);
       expect(s.kill.active).toBe(false);
+      expect(s.db.state('reconcilePending:demo')).toBeNull();
       expect(s.db.list('trades')).toHaveLength(1);
       expect(s.db.list('fills')).toHaveLength(2);
       expect(s.create).toHaveBeenCalledOnce();
       expect(s.cancel).not.toHaveBeenCalled();
     } finally {
-      clock.mockRestore();
       s.db.close();
     }
   });

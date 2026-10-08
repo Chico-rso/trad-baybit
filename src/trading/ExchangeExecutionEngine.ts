@@ -13,6 +13,7 @@ import type {
   Order,
   ExchangeOrder,
   ExchangeFill,
+  ExchangePosition,
   Fill,
   ExitReason,
   OrderState,
@@ -22,7 +23,7 @@ import { BybitClient } from '../exchange/bybit/BybitClient.js';
 import { BybitApiError } from '../exchange/bybit/BybitRestClient.js';
 import { PositionLedger } from './PositionLedger.js';
 import { moveProtection } from './protection.js';
-import type { ExecutionEngine } from './ExecutionEngine.js';
+import { pendingEntry, type ExecutionEngine } from './ExecutionEngine.js';
 import { normalizePrice, normalizeQuantity, nearlyEqual } from '../utils/math.js';
 
 export function orderState(status: string): OrderState {
@@ -46,6 +47,7 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
   private readonly exchangeOrders = new Map<string, ExchangeOrder>();
   private readonly cancelling = new Set<string>();
   private readonly protectionAt = new Map<string, number>();
+  private readonly pendingProtectionOwners = new Map<string, { orderId: string; until: number }>();
   private reconciling = false;
   constructor(
     protected readonly c: Config,
@@ -202,15 +204,42 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
       });
     }
   }
-  private knownProtection(order: ExchangeOrder): boolean {
+  private knownProtection(order: ExchangeOrder, pendingSymbols?: ReadonlySet<string>): boolean {
+    const pending = this.pendingProtectionOwners.get(order.symbol);
+    const entry = pending && this.orders.get(pending.orderId);
+    const awaitingOwnedEntry =
+      pending &&
+      Date.now() < pending.until &&
+      entry &&
+      pendingEntry(entry) &&
+      !this.db.get('trades', entry.id);
     return (
       order.reduceOnly &&
-      !!this.positions.get(order.symbol) &&
+      (this.positions.has(order.symbol) ||
+        !!pendingSymbols?.has(order.symbol) ||
+        !!awaitingOwnedEntry) &&
       !!order.stopOrderType &&
       ['TakeProfit', 'StopLoss', 'TrailingStop', 'PartialTakeProfit', 'PartialStopLoss'].includes(
         order.stopOrderType,
       )
     );
+  }
+  private unconfirmedEntry(remote: ExchangePosition): Order | undefined {
+    if (this.mode !== 'demo' || !this.c.DEMO_CONTINUOUS_TESTING) return;
+    const local = this.positions.get(remote.symbol);
+    const size = Number(remote.size);
+    const candidates = [...this.orders.values()].filter(
+      (order) =>
+        pendingEntry(order) &&
+        order.symbol === remote.symbol &&
+        remote.side === (order.side === 'Long' ? 'Buy' : 'Sell') &&
+        Number.isFinite(size) &&
+        size > (local?.quantity ?? 0) + 1e-8 &&
+        size <= order.quantity + 1e-8 &&
+        (!local || (local.signal.id === order.signal.id && local.side === order.side)) &&
+        !this.db.get('trades', order.id),
+    );
+    return candidates.length === 1 ? candidates[0] : undefined;
   }
   handleExecutions(executions: ExchangeFill[]): void {
     for (const e of [...executions].sort((a, b) => Number(a.execTime) - Number(b.execTime))) {
@@ -346,16 +375,29 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
             remote.side !== (local.side === 'Long' ? 'Buy' : 'Sell') ||
             !nearlyEqual(Number(remote.avgPrice), local.entry, 1e-5)
           );
-        })
+        }) ||
+        [...this.orders.values()].some(
+          (order) => (order.expectedFilledQuantity ?? 0) > order.filledQuantity + 1e-8,
+        )
       ) {
         this.handleExecutions(await this.client.executions(startTime));
         positions = await this.client.positions();
       }
+      const pendingSymbols = new Set(
+        positions.filter((remote) => this.unconfirmedEntry(remote)).map((remote) => remote.symbol),
+      );
       for (const order of orders)
-        if (this.knownProtection(order)) knownProtectionIds.add(order.orderId);
+        if (this.knownProtection(order, pendingSymbols)) knownProtectionIds.add(order.orderId);
       this.handleOrders(orders, knownProtectionIds);
       this.balance = await this.client.equity();
       let mismatch = false;
+      const pendingReasons = new Set<string>();
+      const pendingOwners = new Map<string, string>();
+      const confirmLater = (reason: string) => {
+        mismatch = true;
+        if (this.mode === 'demo' && this.c.DEMO_CONTINUOUS_TESTING) pendingReasons.add(reason);
+        else this.kill.activate(reason);
+      };
       for (const remote of positions) {
         if (this.c.SYMBOLS.includes(remote.symbol) && remote.positionIdx !== 0) {
           mismatch = true;
@@ -369,45 +411,74 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
           continue;
         }
         const local = this.positions.get(remote.symbol);
+        const entry = this.unconfirmedEntry(remote);
         if (!local) {
-          mismatch = true;
-          this.kill.activate('unknown open exchange position');
-          continue;
+          if (!entry) {
+            mismatch = true;
+            this.kill.activate('unknown open exchange position');
+            continue;
+          }
+          confirmLater('unknown open exchange position');
         }
         if (
-          !nearlyEqual(size, local.quantity) ||
-          remote.side !== (local.side === 'Long' ? 'Buy' : 'Sell') ||
-          !nearlyEqual(Number(remote.avgPrice), local.entry, 1e-5)
+          local &&
+          (!nearlyEqual(size, local.quantity) ||
+            remote.side !== (local.side === 'Long' ? 'Buy' : 'Sell') ||
+            !nearlyEqual(Number(remote.avgPrice), local.entry, 1e-5))
         ) {
+          if (entry) confirmLater('local/exchange position mismatch');
+          else {
+            mismatch = true;
+            this.kill.activate('local/exchange position mismatch');
+          }
+        }
+        const validPrice = Number.isFinite(Number(remote.avgPrice)) && Number(remote.avgPrice) > 0;
+        if (!validPrice) {
           mismatch = true;
           this.kill.activate('local/exchange position mismatch');
         }
+        const protection = local ?? entry!.signal;
         const protectedStop = Number(remote.stopLoss),
           protectedTarget = Number(remote.takeProfit);
-        if (!(protectedStop > 0 && protectedTarget > 0)) {
+        const hasProtection =
+          Number.isFinite(protectedStop) &&
+          Number.isFinite(protectedTarget) &&
+          protectedStop > 0 &&
+          protectedTarget > 0;
+        const matchingProtection =
+          nearlyEqual(protectedStop, protection.stopLoss) &&
+          nearlyEqual(protectedTarget, protection.takeProfit);
+        if (!hasProtection) {
           mismatch = true;
           this.kill.activate('exchange position has missing protection');
-        } else if (
-          !nearlyEqual(protectedStop, local.stopLoss) ||
-          !nearlyEqual(protectedTarget, local.takeProfit)
-        ) {
+        } else if (!matchingProtection) {
           mismatch = true;
           this.kill.activate('exchange protection differs from local state');
         }
-        if (Number(remote.leverage) > this.c.MAX_LEVERAGE) {
+        const leverage = Number(remote.leverage);
+        const validLeverage =
+          Number.isFinite(leverage) && leverage > 0 && leverage <= this.c.MAX_LEVERAGE;
+        if (!validLeverage) {
           mismatch = true;
           this.kill.activate('exchange leverage exceeds configured limit');
         }
+        if (
+          entry &&
+          remote.positionIdx === 0 &&
+          validPrice &&
+          hasProtection &&
+          matchingProtection &&
+          validLeverage
+        )
+          pendingOwners.set(remote.symbol, entry.id);
       }
       for (const local of this.positions.values())
         if (!positions.some((p) => p.symbol === local.symbol && Number(p.size) > 0)) {
-          mismatch = true;
-          this.kill.activate('local position missing on exchange');
+          confirmLater('local position missing on exchange');
         }
       for (const order of this.orders.values())
         if ((order.expectedFilledQuantity ?? 0) > order.filledQuantity + 1e-8) {
-          mismatch = true;
-          this.kill.activate('order fills not fully reconciled');
+          confirmLater('order fills not fully reconciled');
         }
       if (
         orders.some(
@@ -418,6 +489,28 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
         )
       )
         mismatch = true;
+      const pendingKey = `reconcilePending:${this.mode}`;
+      const pending = this.db.state<{ since: number; reasons: string[] } | null>(pendingKey);
+      this.pendingProtectionOwners.clear();
+      if (pendingReasons.size > 0) {
+        const now = Date.now();
+        const since = pending?.since ?? now;
+        const reasons = [...pendingReasons];
+        this.db.setState(pendingKey, { since, reasons });
+        if (!Number.isFinite(since) || since > now || now - since >= 30000) {
+          for (const reason of reasons) this.kill.activate(reason);
+        } else {
+          for (const [symbol, orderId] of pendingOwners)
+            this.pendingProtectionOwners.set(symbol, { orderId, until: since + 30000 });
+          this.logger.warn({ event: 'account.reconcile.pending', since, reasons });
+        }
+      } else if (pending && !mismatch) {
+        this.db.setState(pendingKey, null);
+        this.logger.info({
+          event: 'account.reconcile.confirmed',
+          previousReasons: pending.reasons,
+        });
+      }
       this.synchronized = !mismatch;
       this.db.setState(`reconcile:${this.mode}`, {
         timestamp: Date.now(),
