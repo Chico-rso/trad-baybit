@@ -324,7 +324,12 @@ export class ExchangeExecutionEngine extends PositionLedger implements Execution
         Date.now(),
         ...[...this.positions.values()].map((p) => p.entryTime),
         ...[...this.orders.values()]
-          .filter((o) => this.pendingSymbols().includes(o.symbol))
+          // Only the unresolved intent needs history, not terminal orders on its symbol.
+          .filter(
+            (o) =>
+              ['created', 'new', 'partially_filled', 'unknown'].includes(o.state) ||
+              (o.expectedFilledQuantity ?? 0) > o.filledQuantity + 1e-8,
+          )
           .map((o) => o.timestamp),
       );
       if (Date.now() - earliest > 6 * 86400000)

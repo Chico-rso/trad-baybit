@@ -117,6 +117,91 @@ const ownedEntryOrder = (s: Awaited<ReturnType<typeof openPosition>>) => ({
   cumExecQty: '1',
 });
 
+describe('execution history belongs to individual unresolved intents', () => {
+  it.each(['filled', 'cancelled', 'rejected'] as const)(
+    'ignores an old %s order when a new entry on the same symbol is pending',
+    async (state) => {
+      const s = await openPosition(false, 'demo');
+      const current = s.engine.orders.get(s.entry.orderLinkId)!;
+      const old = {
+        ...current,
+        id: 'old-terminal',
+        exchangeId: 'old-exchange-order',
+        timestamp: s.now - 7 * 86400000,
+        state,
+        filledQuantity: state === 'filled' ? 1 : 0,
+        expectedFilledQuantity: state === 'filled' ? 1 : 0,
+      };
+      s.engine.orders.set(old.id, old);
+      s.db.save('orders', old.id, old, old.timestamp);
+      vi.spyOn(s.client, 'findOrder').mockResolvedValue(ownedEntryOrder(s));
+      s.executions.mockResolvedValue([s.entry]);
+      s.positions.mockResolvedValue([remotePosition]);
+      try {
+        await s.engine.reconcile();
+        expect(s.kill.reasons).toEqual([]);
+        expect(s.engine.synchronized).toBe(true);
+        expect(s.executions.mock.calls[0]![0]).toBeGreaterThanOrEqual(s.now - 60000);
+        expect(s.engine.orders.get(old.id)).toEqual(old);
+        expect(s.db.get('orders', old.id)).toEqual(old);
+        expect(s.create).toHaveBeenCalledOnce();
+      } finally {
+        s.db.close();
+      }
+    },
+  );
+
+  it.each(['entry intent', 'close intent', 'fill deficit', 'open position'] as const)(
+    'keeps the six-day guard for a genuinely old %s',
+    async (kind) => {
+      const s = await openPosition(kind === 'close intent' || kind === 'open position', 'demo');
+      const oldTime = s.now - 7 * 86400000;
+      const current = s.engine.orders.get(s.entry.orderLinkId)!;
+      if (kind === 'open position') {
+        s.engine.positions.get('BTCUSDT')!.entryTime = oldTime;
+      } else {
+        const old = {
+          ...current,
+          id: 'aged-unresolved',
+          exchangeId: 'aged-exchange-order',
+          timestamp: oldTime,
+          reduceOnly: kind === 'close intent',
+          side: kind === 'close intent' ? ('Short' as const) : current.side,
+          state: kind === 'fill deficit' ? ('filled' as const) : ('new' as const),
+          filledQuantity: 0,
+          expectedFilledQuantity: kind === 'fill deficit' ? 1 : 0,
+        };
+        s.engine.orders.set(old.id, old);
+        s.db.save('orders', old.id, old, old.timestamp);
+        vi.mocked(s.client.orders).mockResolvedValue([
+          {
+            ...ownedEntryOrder(s),
+            orderId: old.exchangeId,
+            orderLinkId: old.id,
+            orderStatus: kind === 'fill deficit' ? 'Filled' : 'New',
+            cumExecQty: String(old.expectedFilledQuantity),
+            side: kind === 'close intent' ? 'Sell' : 'Buy',
+            reduceOnly: old.reduceOnly,
+          },
+        ]);
+        vi.spyOn(s.client, 'findOrder').mockResolvedValue(ownedEntryOrder(s));
+      }
+      if (s.engine.positions.size) s.positions.mockResolvedValue([remotePosition]);
+      try {
+        await s.engine.reconcile();
+        expect(s.kill.reasons).toContain(
+          'reconciliation history exceeds six days; manual audit required',
+        );
+        expect(s.executions.mock.calls[0]![0]).toBeGreaterThanOrEqual(s.now - 6 * 86400000);
+        expect(s.executions.mock.calls[0]![0]).toBeLessThan(s.now - 60000);
+        expect(s.create).toHaveBeenCalledOnce();
+      } finally {
+        s.db.close();
+      }
+    },
+  );
+});
+
 describe('bounded confirmation of delayed executions in continuous DEMO', () => {
   it.each([false, true])(
     'lets the queue account an owned entry after both REST reads, with native protection: %s',
